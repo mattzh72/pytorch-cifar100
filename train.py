@@ -125,6 +125,7 @@ if __name__ == '__main__':
     parser.add_argument('-warm', type=int, default=1, help='warm up training phase')
     parser.add_argument('-lr', type=float, default=0.1, help='initial learning rate')
     parser.add_argument('-resume', action='store_true', default=False, help='resume training')
+    parser.add_argument('-checkpoint', action='store_true', default=False, help='store checkpoints')
     args = parser.parse_args()
 
     net = get_network(args)
@@ -213,14 +214,14 @@ if __name__ == '__main__':
         acc = eval_training(epoch)
 
         #start to save best performance model after learning rate decay to 0.01
-        if epoch > settings.MILESTONES[1] and best_acc < acc:
+        if args.checkpoint and epoch > settings.MILESTONES[1] and best_acc < acc:
             weights_path = checkpoint_path.format(net=args.net, epoch=epoch, type='best')
             print('saving weights file to {}'.format(weights_path))
             torch.save(net.state_dict(), weights_path)
             best_acc = acc
             continue
 
-        if not epoch % settings.SAVE_EPOCH:
+        if args.checkpoint and not epoch % settings.SAVE_EPOCH:
             weights_path = checkpoint_path.format(net=args.net, epoch=epoch, type='regular')
             print('saving weights file to {}'.format(weights_path))
             torch.save(net.state_dict(), weights_path)
