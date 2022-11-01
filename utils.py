@@ -14,6 +14,7 @@ from torch.optim.lr_scheduler import _LRScheduler
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
+import torch.nn as nn
 
 
 def get_network(args):
@@ -152,6 +153,15 @@ def get_network(args):
     elif args.net == 'stochasticdepth101':
         from models.stochasticdepth import stochastic_depth_resnet101
         net = stochastic_depth_resnet101()
+    elif args.net == 'pytorch-resnet18':
+        from models.resnet_pytorch import resnet18
+        
+        net = resnet18(num_classes = 100, 
+                      bn_learnable_affine_params = not args.no_learnable_params_bn,
+                      bn_track_running_stats = not args.no_track_running_stats_bn)
+        # print(net)
+        # assert False
+        
 
     else:
         print('the network name you have entered is not supported yet')
@@ -186,7 +196,7 @@ def get_training_dataloader(mean, std, batch_size=16, num_workers=2, shuffle=Tru
     #cifar100_training = CIFAR100Train(path, transform=transform_train)
     cifar100_training = torchvision.datasets.CIFAR100(root='./data', train=True, download=True, transform=transform_train)
     cifar100_training_loader = DataLoader(
-        cifar100_training, shuffle=shuffle, num_workers=num_workers, batch_size=batch_size)
+        cifar100_training, shuffle=shuffle, num_workers=num_workers, batch_size=batch_size, pin_memory=True)
 
     return cifar100_training_loader
 
@@ -209,7 +219,7 @@ def get_test_dataloader(mean, std, batch_size=16, num_workers=2, shuffle=True):
     #cifar100_test = CIFAR100Test(path, transform=transform_test)
     cifar100_test = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform_test)
     cifar100_test_loader = DataLoader(
-        cifar100_test, shuffle=shuffle, num_workers=num_workers, batch_size=batch_size)
+        cifar100_test, shuffle=shuffle, num_workers=num_workers, batch_size=batch_size, pin_memory=True)
 
     return cifar100_test_loader
 
@@ -306,3 +316,118 @@ def best_acc_weights(weights_folder):
 
     best_files = sorted(best_files, key=lambda w: int(re.search(regex_str, w).groups()[1]))
     return best_files[-1]
+
+"""Matt"""
+def cache_intermediate_output(name, cache):
+  def hook(module, input, output):
+      cache[name] = output.clone() 
+  return hook
+
+def compute_feature_map_covariance(feature_map):
+    """
+    feature_map: (b x c x h x w)
+    Estimates the covariance matrix of the variables given by the 
+    feature_map matrix, where rows are the variables and columns are the 
+    observations.
+    """
+    assert len(feature_map.shape) == 4
+    b,c,h,w = feature_map.shape
+    
+    feature_map_cbhw = torch.permute(feature_map, (1, 0, 2, 3)) # (c x b x h x w)
+    feature_map_collapsed = feature_map_cbhw.reshape(c, b * h * w)
+    
+    covariance_matrix = torch.cov(feature_map_collapsed, correction = 1)
+    assert len(covariance_matrix.shape) == 2 and covariance_matrix.shape[0] == c\
+            and covariance_matrix.shape[1] == c
+
+    return covariance_matrix
+
+
+def feature_map_has_0_mean_1_var(feature_map):
+    """
+    feature_map: (b x c x h x w)
+    """
+    b,c,h,w = feature_map.shape
+    mean_feature_map = torch.mean(feature_map, dim = (0, 2, 3))
+    var_feature_map = torch.var(feature_map, dim = (0, 2, 3))
+
+    # print(mean_feature_map, var_feature_map)
+
+    return_check = torch.isclose(mean_feature_map, torch.zeros(c).cuda(), atol=1e-01).all() \
+            and torch.isclose(var_feature_map, torch.ones(c).cuda(), atol=1e-01).all() or \
+            torch.isnan(mean_feature_map).any() or torch.isnan(var_feature_map).any()
+
+    if not return_check:
+        print(torch.mean(mean_feature_map), torch.mean(var_feature_map), feature_map.shape)
+    return return_check
+def compute_feature_map_covariance_distance_from_identity(feature_map):
+    """
+    feature_map: (b x c x h x w)
+    """
+    b,c,h,w = feature_map.shape
+
+    
+    # assert feature_map_has_0_mean_1_var(feature_map)
+    
+    
+    covariance_matrix = compute_feature_map_covariance(feature_map)
+    distance = torch.linalg.norm(covariance_matrix - torch.eye(c).cuda())
+
+    return distance
+
+
+
+def compute_all_conv2d_kernel_kurtoses(net):
+    kernels = {}
+    for name, layer in net.named_modules():
+        if isinstance(layer, nn.Conv2d):
+            params = list(layer.parameters())
+            assert len(params) == 1
+            kernels[name] = compute_kernel_kurtosis(params[0])
+    # print([(k, compute_kernel_kurtosis(v)) for k,v in kernels.items()])
+
+    return kernels
+
+def compute_kernel_kurtosis(kernel):
+  """
+    kernel: (n x c x h x w)
+  """
+  assert len(kernel.shape) == 4
+
+  (n, c, h, w) = kernel.shape
+  kernel_hw_collapsed = kernel.reshape(n, c * h * w)
+  mean = torch.mean(kernel_hw_collapsed, dim=0) # c * h * w
+  assert len(mean.shape)==1 and mean.shape[0]== c * h * w
+  diffs = torch.linalg.norm(kernel_hw_collapsed - mean, dim=-1) # n
+  assert len(diffs.shape)==1 and diffs.shape[0]==n
+  var = torch.mean(torch.pow(diffs, 2.0), dim=-1) # 1
+  assert len(var.shape) == 0 #and var.shape[0] == 1, var.shape
+  zscores = (diffs / torch.pow(var, 0.5)) # n
+  assert len(zscores.shape) == 1 and zscores.shape[0] == n
+  kurt = torch.mean(torch.pow(zscores, 4.0), dim=-1) # 1
+  assert len(kurt.shape) == 0 #and kurt.shape[0] == 1, kurt
+  
+
+
+  # print(zscores.shape, channel_kurt.shape, var.shape, diffs.shape, mean.shape)
+
+  return kurt
+def compute_feature_map_kurtosis(feature_map):
+  """
+    feature_map: (b x c x h x w)
+  """
+  assert len(feature_map.shape) == 4
+
+  (b, c, h, w) = feature_map.shape
+  feature_map_hw_collapsed = feature_map.reshape(b, c, h * w)
+  mean = torch.mean(feature_map_hw_collapsed, dim=1).unsqueeze(dim=1) # b x 1 x h*w
+  diffs = torch.linalg.norm(feature_map_hw_collapsed - mean, dim=-1) # b x c
+  var = torch.mean(torch.pow(diffs, 2.0), dim=1).unsqueeze(dim=1) # b x 1
+  zscores = (diffs / torch.pow(var, 0.5)).squeeze() # b x c
+  channel_kurt = torch.mean(torch.pow(zscores, 4.0), dim=1) # b
+  
+
+
+  # print(zscores.shape, channel_kurt.shape, var.shape, diffs.shape, mean.shape)
+
+  return torch.mean(channel_kurt) 

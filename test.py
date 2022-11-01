@@ -15,6 +15,7 @@ from matplotlib import pyplot as plt
 import torch
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
+import wandb
 
 from conf import settings
 from utils import get_network, get_test_dataloader
