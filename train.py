@@ -285,12 +285,7 @@ if __name__ == '__main__':
     parser.add_argument('-remove_first_conv2d_for_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-subtract_log_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-add_inverse_kurtosis_loss', action='store_true', default=False, help='')
-    
-    
-    
-    
-
-    
+    parser.add_argument('-checkpoint', action='store_true', default=False, help='store checkpoints')
     args = parser.parse_args()
 
     #all kurtosis params need to be specified or none
@@ -437,14 +432,14 @@ if __name__ == '__main__':
             wandb.run.summary["best_accuracy"] = acc if acc > wandb.run.summary["best_accuracy"] else wandb.run.summary["best_accuracy"]
 
         #start to save best performance model after learning rate decay to 0.01
-        if epoch > settings.MILESTONES[1] and best_acc < acc:
+        if args.checkpoint and epoch > settings.MILESTONES[1] and best_acc < acc:
             weights_path = checkpoint_path.format(net=args.net, epoch=epoch, type='best')
             print('saving weights file to {}'.format(weights_path))
             torch.save(net.state_dict(), weights_path)
             best_acc = acc
             continue
 
-        if not epoch % settings.SAVE_EPOCH:
+        if args.checkpoint and not epoch % settings.SAVE_EPOCH:
             weights_path = checkpoint_path.format(net=args.net, epoch=epoch, type='regular')
             print('saving weights file to {}'.format(weights_path))
             torch.save(net.state_dict(), weights_path)
