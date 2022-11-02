@@ -11,6 +11,7 @@ import argparse
 import time
 from datetime import datetime
 from google.protobuf.descriptor import Error
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -38,19 +39,33 @@ def compute_kurtosis_sum(kurtosis_conv2d_feature_map):
             kurtosis_sum = kurtosis_sum + val
     return kurtosis_sum
 
-def compute_kurtosis_term(kurtosis_sum, cross_entropy_loss):
+def compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss):
+    # Select log kurtosis penalty
     if args.subtract_log_kurtosis_loss:
-        kurtosis_term = -1 * args.kurtosis_global_loss_multiplier * torch.log(kurtosis_sum)
+        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
+        kurtosis_term = -1 * torch.log(kurtosis_sum)
+    # Select inverse kurtosis penalty
     elif args.add_inverse_kurtosis_loss:
-        kurtosis_term = args.kurtosis_global_loss_multiplier * 1/kurtosis_sum
+        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
+        kurtosis_term = 1/kurtosis_sum
+    elif args.add_mse_kurtosis_loss != None:
+        loss = nn.MSELoss()
+        # If flag is set, discard first conv2d outputs
+        if args.remove_first_conv2d_for_kurtosis_loss:
+          kurtoses = [v for (k,v) in kurtosis_conv2d_feature_map.items() if k != name_of_first_conv]
+        else:
+          kurtoses = list(kurtosis_conv2d_feature_map.values())
+        kurtoses = torch.stack(kurtoses)
+        kurtosis_term = loss(kurtoses, torch.ones(kurtoses.shape[0]).cuda() * args.add_mse_kurtosis_loss)
     else:
         raise Error()
-    return kurtosis_term
+    return kurtosis_term * args.kurtosis_global_loss_multiplier
 
 def train(epoch):
     start = time.time()
     net.train()
-    for batch_index, (images, labels) in enumerate(cifar100_training_loader):
+    pbar = tqdm(cifar100_training_loader)
+    for batch_index, (images, labels) in enumerate(pbar):
 
         if args.gpu:
             labels = labels.cuda()
@@ -85,7 +100,7 @@ def train(epoch):
         if args.kurtosis_loss:
             #kurtosis + cross entropy global loss
             kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
-            kurtosis_term = compute_kurtosis_term(kurtosis_sum, cross_entropy_loss)
+            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss)
             loss = cross_entropy_loss + kurtosis_term
         else:
             #cross entropy global loss
@@ -94,6 +109,8 @@ def train(epoch):
         loss.backward()
         optimizer.step()
         
+        pbar.set_description(f"Kurtosis Loss: {kurtosis_term.item()} \t CE Loss: {cross_entropy_loss.item()}")
+
         if args.wandb:
             # Emit to wandb
             metrics = {
@@ -109,12 +126,6 @@ def train(epoch):
                       **metrics,
                       **{'train/kurtosis_sum': kurtosis_sum.item() if args.kurtosis_loss else None,
                         'train/kurtosis_loss_term': kurtosis_term.item() if args.kurtosis_loss else None} }) 
-            
-        else:
-            #normal cross entropy loss calculation and gradient step
-            loss = loss_function(outputs, labels)
-            loss.backward()
-            optimizer.step()
 
         n_iter = (epoch - 1) * len(cifar100_training_loader) + batch_index + 1
 
@@ -125,21 +136,19 @@ def train(epoch):
             if 'bias' in name:
                 writer.add_scalar('LastLayerGradients/grad_norm2_bias', para.grad.norm(), n_iter)
 
-        print('Training Epoch: {epoch} [{trained_samples}/{total_samples}]\tGlobal Loss: {:0.4f}\tCE_loss: {:0.4f}\tKurtosis_loss: {:0.4f}\tLR: {:0.6f}'.format(
-            loss.item(),
-            cross_entropy_loss.item(),
-            kurtosis_term.item() if args.kurtosis_loss else -1,
-            optimizer.param_groups[0]['lr'],
-            epoch=epoch,
-            trained_samples=batch_index * args.b + len(images),
-            total_samples=len(cifar100_training_loader.dataset)
-        ))
+        if args.verbose: 
+          print('Training Epoch: {epoch} [{trained_samples}/{total_samples}]\tGlobal Loss: {:0.4f}\tCE_loss: {:0.4f}\tKurtosis_loss: {:0.4f}\tLR: {:0.6f}'.format(
+              loss.item(),
+              cross_entropy_loss.item(),
+              kurtosis_term.item() if args.kurtosis_loss else -1,
+              optimizer.param_groups[0]['lr'],
+              epoch=epoch,
+              trained_samples=batch_index * args.b + len(images),
+              total_samples=len(cifar100_training_loader.dataset)
+          ))
 
         #update training loss for each iteration
         writer.add_scalar('Train/loss', loss.item(), n_iter)
-
-
-            
 
         if epoch <= args.warm:
             warmup_scheduler.step()
@@ -151,7 +160,8 @@ def train(epoch):
 
     finish = time.time()
 
-    print('epoch {} training time consumed: {:.2f}s'.format(epoch, finish - start))
+    if args.verbose:
+      print('epoch {} training time consumed: {:.2f}s'.format(epoch, finish - start))
 
 @torch.no_grad()
 def eval_training(epoch=0, tb=True):
@@ -165,7 +175,8 @@ def eval_training(epoch=0, tb=True):
     test_average_kurtosis_term = 0
     test_average_cross_entropy_term = 0
 
-    for (images, labels) in cifar100_test_loader:
+    pbar = tqdm(cifar100_test_loader)
+    for (images, labels) in pbar:
 
         if args.gpu:
             images = images.cuda()
@@ -204,7 +215,7 @@ def eval_training(epoch=0, tb=True):
         if args.kurtosis_loss:
             #kurtosis + cross entropy global loss
             kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
-            kurtosis_term = compute_kurtosis_term(kurtosis_sum, cross_entropy_loss)
+            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss)
             loss = cross_entropy_loss + kurtosis_term
         else:
             #cross entropy global loss
@@ -226,7 +237,7 @@ def eval_training(epoch=0, tb=True):
         test_correct += preds.eq(labels).sum()
     
     train_correct = 0.0
-    for (images, labels) in cifar100_training_loader:
+    for (images, labels) in tqdm(cifar100_training_loader):
 
         if args.gpu:
             images = images.cuda()
@@ -238,18 +249,19 @@ def eval_training(epoch=0, tb=True):
         train_correct += preds.eq(labels).sum()
 
     finish = time.time()
-    if args.gpu:
-        print('GPU INFO.....')
-        print(torch.cuda.memory_summary(), end='')
-    print('Evaluating Network.....')
-    print('Test set: Epoch: {}, Average loss: {:.4f}, Accuracy: {:.4f}, Time consumed:{:.2f}s'.format(
-        epoch,
-        # test_loss / len(cifar100_test_loader.dataset),
-        test_loss,
-        test_correct.float() / len(cifar100_test_loader.dataset),
-        finish - start
-    ))
-    print()
+    if args.verbose:
+      if args.gpu:
+          print('GPU INFO.....')
+          print(torch.cuda.memory_summary(), end='')
+      print('Evaluating Network.....')
+      print('Test set: Epoch: {}, Average loss: {:.4f}, Accuracy: {:.4f}, Time consumed:{:.2f}s'.format(
+          epoch,
+          # test_loss / len(cifar100_test_loader.dataset),
+          test_loss,
+          test_correct.float() / len(cifar100_test_loader.dataset),
+          finish - start
+      ))
+      print()
 
     
     if args.wandb:
@@ -277,7 +289,8 @@ if __name__ == '__main__':
     parser.add_argument('-resume', action='store_true', default=False, help='resume training')
     parser.add_argument('-no_learnable_params_bn', action='store_true', default=False, help='')
     parser.add_argument('-no_track_running_stats_bn', action='store_true', default=False, help='')
-    parser.add_argument('-wandb', type=int, default=0, help='weights and biases is used')
+    parser.add_argument('-wandb', action='store_true', default=False, help='weights and biases is used')
+    parser.add_argument('-verbose', action='store_true', default=False, help='whether or not to print')
 
     ##Kurtosis Args
     parser.add_argument('-kurtosis_loss', action='store_true', default=False, help='')
@@ -285,19 +298,25 @@ if __name__ == '__main__':
     parser.add_argument('-remove_first_conv2d_for_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-subtract_log_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-add_inverse_kurtosis_loss', action='store_true', default=False, help='')
+    parser.add_argument('-add_mse_kurtosis_loss', type=float, default=None, help='')
     parser.add_argument('-checkpoint', action='store_true', default=False, help='store checkpoints')
     args = parser.parse_args()
 
-    #all kurtosis params need to be specified or none
-    assert (args.kurtosis_loss and args.kurtosis_global_loss_multiplier) or \
-            (not args.kurtosis_loss and not args.kurtosis_global_loss_multiplier)
+    kurtosis_flags = [
+      args.subtract_log_kurtosis_loss,
+      args.add_inverse_kurtosis_loss,
+      args.add_mse_kurtosis_loss != None
+    ]
+
     if args.kurtosis_loss:
-        assert args.add_inverse_kurtosis_loss != args.subtract_log_kurtosis_loss
+      assert sum(kurtosis_flags) == 1
+    else:
+      assert sum(kurtosis_flags) == 0
+
+    assert bool(args.kurtosis_loss) == bool(args.kurtosis_global_loss_multiplier)    
 
     net = get_network(args)
-
     conv2d_feature_map_cache = {}
-
     name_of_first_conv = None
     
     for name, layer in net.named_modules():
@@ -367,9 +386,10 @@ if __name__ == '__main__':
     writer.add_graph(net, input_tensor)
 
     #create checkpoint folder to save model
-    if not os.path.exists(checkpoint_path):
-        os.makedirs(checkpoint_path)
-    checkpoint_path = os.path.join(checkpoint_path, '{net}-{epoch}-{type}.pth')
+    if args.checkpoint:
+      if not os.path.exists(checkpoint_path):
+          os.makedirs(checkpoint_path)
+      checkpoint_path = os.path.join(checkpoint_path, '{net}-{epoch}-{type}.pth')
 
     best_acc = 0.0
     
@@ -411,8 +431,8 @@ if __name__ == '__main__':
             'add_inverse_kurtosis_loss': None if not args.kurtosis_loss \
                            else args.add_inverse_kurtosis_loss,
             'subtract_log_kurtosis_loss': None if not args.kurtosis_loss \
-                           else args.subtract_log_kurtosis_loss
-              
+                           else args.subtract_log_kurtosis_loss,
+            'add_mse_kurtosis_loss': args.subtract_log_kurtosis_loss
           }
         )
 
