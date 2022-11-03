@@ -97,11 +97,16 @@ def train(epoch):
        
         cross_entropy_loss = loss_function(outputs, labels)
    
+        pbar_descrip = f"CE Loss: {cross_entropy_loss.item()}"
         if args.kurtosis_loss:
             #kurtosis + cross entropy global loss
             kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
             kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss)
-            loss = cross_entropy_loss + kurtosis_term
+
+            # constraint = int(cross_entropy_loss < kurtosis_term) * (kurtosis_term - cross_entropy_loss)
+
+            loss = cross_entropy_loss + kurtosis_term # * 0.1 * constraint
+            pbar_descrip += f"\tKurtosis Loss: {kurtosis_term.item()}"
         else:
             #cross entropy global loss
             loss = cross_entropy_loss
@@ -109,7 +114,7 @@ def train(epoch):
         loss.backward()
         optimizer.step()
         
-        pbar.set_description(f"Kurtosis Loss: {kurtosis_term.item()} \t CE Loss: {cross_entropy_loss.item()}")
+        pbar.set_description(pbar_descrip)
 
         if args.wandb:
             # Emit to wandb
@@ -216,6 +221,7 @@ def eval_training(epoch=0, tb=True):
             #kurtosis + cross entropy global loss
             kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
             kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss)
+                        
             loss = cross_entropy_loss + kurtosis_term
         else:
             #cross entropy global loss
@@ -248,8 +254,8 @@ def eval_training(epoch=0, tb=True):
         _, preds = outputs.max(1)
         train_correct += preds.eq(labels).sum()
 
-    finish = time.time()
     if args.verbose:
+      finish = time.time()
       if args.gpu:
           print('GPU INFO.....')
           print(torch.cuda.memory_summary(), end='')
@@ -432,7 +438,7 @@ if __name__ == '__main__':
                            else args.add_inverse_kurtosis_loss,
             'subtract_log_kurtosis_loss': None if not args.kurtosis_loss \
                            else args.subtract_log_kurtosis_loss,
-            'add_mse_kurtosis_loss': args.subtract_log_kurtosis_loss
+            'add_mse_kurtosis_loss': args.add_mse_kurtosis_loss
           }
         )
 
