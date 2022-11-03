@@ -73,7 +73,10 @@ class BasicBlock(nn.Module):
         dilation: int = 1,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
         bn_learnable_affine_params = True,
-        bn_track_running_stats = True
+        bn_track_running_stats = True,
+        post_whitening = False,
+        pre_whitening = False,
+        switch_3x3conv2d_and_bn = False
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -84,28 +87,82 @@ class BasicBlock(nn.Module):
         if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
-        self.conv1 = conv3x3(inplanes, planes, stride)
-        self.bn1 = norm_layer(planes, 
+
+        self.pre_whitening = pre_whitening
+        self.post_whitening = post_whitening
+        self.switch_3x3conv2d_and_bn = switch_3x3conv2d_and_bn
+
+        
+        conv1 = conv3x3(inplanes if not self.switch_3x3conv2d_and_bn else planes, 
+                              planes, 
+                              stride)
+        bn1 = norm_layer(planes if not self.switch_3x3conv2d_and_bn else inplanes, 
                               affine = bn_learnable_affine_params,
                               track_running_stats =  bn_track_running_stats)
+        
+        if self.pre_whitening:
+            bn1_whitening = conv1x1(planes, planes, stride = 1)
+        if self.switch_3x3conv2d_and_bn:
+            self.bn1 = bn1
+            if self.pre_whitening:
+                self.bn1_whitening = bn1_whitening
+            self.conv1 = conv1
+        else:
+            self.conv1 = conv1
+            self.bn1 = bn1
+            if self.pre_whitening:
+                self.bn1_whitening = bn1_whitening
+        
+        
         self.relu = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = norm_layer(planes, 
                               affine = bn_learnable_affine_params,
                               track_running_stats = bn_track_running_stats,)
+        if self.post_whitening:
+            bn2_whitening = conv1x1(planes, planes, stride = 1)
+        if self.switch_3x3conv2d_and_bn:
+            self.bn1 = bn1
+            if self.post_whitening:
+                self.bn2_whitening = bn2_whitening
+            self.conv1 = conv1
+        else:
+            self.conv1 = conv1
+            self.bn1 = bn1
+            if self.post_whitening:
+                self.bn2_whitening = bn2_whitening
+
+        
         self.downsample = downsample
         self.stride = stride
 
+    # def arrange_conv_bn_layers_by_flag(first_layer, second_layer, third_layer, enable_whitening):
+
     def forward(self, x: Tensor) -> Tensor:
         identity = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
+        if self.switch_3x3conv2d_and_bn:
+            out = self.bn1(x)
+            if self.pre_whitening:
+                out = self.bn1_whitening(out)
+            out = self.conv1(out)
+        else:
+            out = self.conv1(x)
+            out = self.bn1(out)
+            if self.pre_whitening:
+                out = self.bn1_whitening(out)
 
         out = self.relu(out)
 
-        out = self.conv2(out)
-        out = self.bn2(out)
+        if self.switch_3x3conv2d_and_bn:
+            out = self.bn2(out)
+            if self.post_whitening:
+                out = self.bn2_whitening(out)
+            out = self.conv2(out)
+        else:
+            out = self.conv2(out)
+            out = self.bn2(out)
+            if self.post_whitening:
+                out = self.bn2_whitening(out)
         
 
         if self.downsample is not None:
@@ -187,7 +244,10 @@ class ResNet(nn.Module):
         replace_stride_with_dilation: Optional[List[bool]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
         bn_learnable_affine_params = True,
-        bn_track_running_stats = True
+        bn_track_running_stats = True,
+        post_whitening = False,
+        pre_whitening = False,
+        switch_3x3conv2d_and_bn = False
     ) -> None:
         super().__init__()
         _log_api_usage_once(self)
@@ -196,6 +256,10 @@ class ResNet(nn.Module):
         self._norm_layer = norm_layer
 
         assert norm_layer == nn.BatchNorm2d
+
+        self.post_whitening = post_whitening
+        self.pre_whitening = pre_whitening
+        self.switch_3x3conv2d_and_bn = switch_3x3conv2d_and_bn
 
         self.inplanes = 64
         self.dilation = 1
@@ -281,7 +345,10 @@ class ResNet(nn.Module):
             block(
                 self.inplanes, planes, stride, downsample, self.groups, self.base_width, previous_dilation, norm_layer, 
                 bn_learnable_affine_params = bn_learnable_affine_params,
-                bn_track_running_stats = bn_track_running_stats
+                bn_track_running_stats = bn_track_running_stats,
+                post_whitening = self.post_whitening,
+                pre_whitening = self.pre_whitening,
+                switch_3x3conv2d_and_bn = self.switch_3x3conv2d_and_bn
             )
         )
         self.inplanes = planes * block.expansion
@@ -295,7 +362,10 @@ class ResNet(nn.Module):
                     dilation=self.dilation,
                     norm_layer=norm_layer,
                     bn_learnable_affine_params = bn_learnable_affine_params,
-                    bn_track_running_stats = bn_track_running_stats
+                    bn_track_running_stats = bn_track_running_stats,
+                    post_whitening = self.post_whitening,
+                    pre_whitening = self.pre_whitening,
+                    switch_3x3conv2d_and_bn = self.switch_3x3conv2d_and_bn
                 )
             )
 

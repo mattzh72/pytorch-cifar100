@@ -86,9 +86,13 @@ def train(epoch):
         kurtosis_kernel_metrics = { "train/kurtosis_conv2d_kernels/kurtosis_{}".format(k):v \
                               for (k,v) in kurtosis_kernel.items()}
 
+        # covariance_distance_identity_feature_map_metrics = { "train/covariance_dist_from_identity_bn_feature_maps/{}".format(k): \
+        #                       compute_feature_map_covariance_distance_from_identity(v).item()  \
+        #                       for (k,v) in batch_norm_feature_map_cache.items()} 
+
         covariance_distance_identity_feature_map_metrics = { "train/covariance_dist_from_identity_bn_feature_maps/{}".format(k): \
                               compute_feature_map_covariance_distance_from_identity(v).item()  \
-                              for (k,v) in batch_norm_feature_map_cache.items()} 
+                              for (k,v) in whitening_conv1x1_feature_map_cache.items()} 
         
         if args.no_learnable_params_bn and args.no_track_running_stats_bn:
               for (k,v) in batch_norm_feature_map_cache.items():
@@ -202,9 +206,9 @@ def eval_training(epoch=0, tb=True):
         kurtosis_kernel_metrics = { "test/kurtosis_conv2d_kernels/kurtosis_{}".format(k):v \
                               for (k,v) in kurtosis_kernel.items()}
 
-        covariance_distance_identity_feature_map_metrics = { "test/covariance_dist_from_identity_bn_feature_maps/{}".format(k): \
-                              compute_feature_map_covariance_distance_from_identity(v).item()  \
-                              for (k,v) in batch_norm_feature_map_cache.items()} 
+        # covariance_distance_identity_feature_map_metrics = { "test/covariance_dist_from_identity_bn_feature_maps/{}".format(k): \
+        #                       compute_feature_map_covariance_distance_from_identity(v).item()  \
+        #                       for (k,v) in batch_norm_feature_map_cache.items()} 
         
         if args.no_learnable_params_bn and args.no_track_running_stats_bn:
               for (k,v) in batch_norm_feature_map_cache.items():
@@ -306,6 +310,15 @@ if __name__ == '__main__':
     parser.add_argument('-add_inverse_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-add_mse_kurtosis_loss', type=float, default=None, help='')
     parser.add_argument('-checkpoint', action='store_true', default=False, help='store checkpoints')
+    
+    
+    #Whitening Args
+    parser.add_argument('-post_whitening', action='store_true', default=False, help='')
+    parser.add_argument('-pre_whitening', action='store_true', default=False, help='')
+    parser.add_argument('-switch_3x3conv2d_and_bn', action='store_true', default=False, help='')
+    
+    
+    
     args = parser.parse_args()
 
     kurtosis_flags = [
@@ -327,14 +340,27 @@ if __name__ == '__main__':
     
     for name, layer in net.named_modules():
         if isinstance(layer, nn.Conv2d):
-            layer.register_forward_hook(cache_intermediate_output(name, conv2d_feature_map_cache))
-            if name_of_first_conv is None:
-                name_of_first_conv = name
-    
+            if 'conv' in name:
+                layer.register_forward_hook(cache_intermediate_output(name, conv2d_feature_map_cache))
+                if name_of_first_conv is None:
+                    name_of_first_conv = name
     
 
+    whitening_conv1x1_feature_map_cache = {}
+    whitening_layers = {}
+    
+    
+    for name, layer in net.named_modules():
+        if 'whitening' in name:
+            layer.register_forward_hook(cache_intermediate_output(name, conv2d_feature_map_cache))
+            whitening_layers[name] = layer
+    
+    whitening_optimizers = {}
+    for name, layer in whitening_layers.items():
+        whitening_optimizers[name] = optim.SGD(layer.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+            
     if args.wandb:
-      import wandb
+        import wandb
 
     #set up intermediate layer feature map caching
     batch_norm_feature_map_cache = {}

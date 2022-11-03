@@ -158,7 +158,10 @@ def get_network(args):
         
         net = resnet18(num_classes = 100, 
                       bn_learnable_affine_params = not args.no_learnable_params_bn,
-                      bn_track_running_stats = not args.no_track_running_stats_bn)
+                      bn_track_running_stats = not args.no_track_running_stats_bn,
+                      post_whitening = args.post_whitening,
+                      pre_whitening = args.pre_whitening,
+                      switch_3x3conv2d_and_bn = args.switch_3x3conv2d_and_bn)
         # print(net)
         # assert False
         
