@@ -346,10 +346,11 @@ def initialize_wandb(wandb_obj, settings, args):
                            else args.add_inverse_kurtosis_loss,
             'subtract_log_kurtosis_loss': None if not args.kurtosis_loss \
                            else args.subtract_log_kurtosis_loss,
-            'add_mse_kurtosis_loss': args.add_mse_kurtosis_loss
+            'add_mse_kurtosis_loss': args.add_mse_kurtosis_loss,
             'post_whitening': args.post_whitening,
             'pre_whitening': args.pre_whitening,
-            'switch_3x3conv2d_and_bn': args.switch_3x3conv2d_and_bn
+            'switch_3x3conv2d_and_bn': args.switch_3x3conv2d_and_bn,
+            'whitening_strength': args.whitening_strength
           }
         )
     wandb_obj.run.summary["best_accuracy"] = 0
@@ -375,4 +376,10 @@ def get_conv2d_feature_map_cache_and_name_of_first_conv(net):
     return conv2d_feature_map_cache, name_of_first_conv
 
 
+def toggle_grad_module(module, gradStatus):
+    for param in module.parameters():
+        param.requires_grad = gradStatus
+def toggle_grad_params(params, gradStatus):
+    for p in params:
+        p.requires_grad = gradStatus
 

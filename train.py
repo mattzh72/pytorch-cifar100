@@ -26,7 +26,8 @@ from torch.utils.tensorboard import SummaryWriter
 from conf import settings
 from utils import get_network, get_training_dataloader, get_test_dataloader, WarmUpLR, \
     most_recent_folder, most_recent_weights, last_epoch, best_acc_weights, cache_intermediate_output, \
-    initialize_wandb, get_batch_norm_feature_map_cache, get_conv2d_feature_map_cache_and_name_of_first_conv
+    initialize_wandb, get_batch_norm_feature_map_cache, get_conv2d_feature_map_cache_and_name_of_first_conv, \
+    toggle_grad_module, toggle_grad_params
     
 
 from kurtosis_loss_utils import compute_kurtosis_sum, compute_kurtosis_term, \
@@ -71,8 +72,15 @@ def train(epoch):
         #                       for (k,v) in batch_norm_feature_map_cache.items()} 
 
         # Calculate covariance losses for conv1x1 whitening layers
+        # print("len keys",len(whitening_conv1x1_feature_map_cache.keys()))
+        # print(whitening_conv1x1_feature_map_cache.keys())
+        # assert False
         covariance_distance_identity_whitening_feature_map = { k: compute_feature_map_covariance_distance_from_identity(v)  \
                               for (k,v) in whitening_conv1x1_feature_map_cache.items()} 
+
+        covariance_distance_identity_whitening_feature_map_metrics = { "train/covariance_dist_from_identity_whitening_feature_maps/{}".format(k): \
+                              v.item()  \
+                              for (k,v) in covariance_distance_identity_whitening_feature_map.items()} 
         
         if args.no_learnable_params_bn and args.no_track_running_stats_bn:
               for (k,v) in batch_norm_feature_map_cache.items():
@@ -90,18 +98,29 @@ def train(epoch):
         else:
             #cross entropy global loss
             loss = cross_entropy_loss
-
+        
+        toggle_grad_module(net, False)
         # Conduct whitening loss first before CE loss
-        for distance in covariance_distance_identity_whitening_feature_map.values(): 
-            # accuracy_aware_whitening_loss = cross_entropy_loss + 
-            distance.backward(retain_graph = True)
+        for layer_name, distance in covariance_distance_identity_whitening_feature_map.items():
+            # whitening_loss_term = torch.log(args.whitening_strength*distance)
+            whitening_loss_term = args.whitening_strength*distance
+            accuracy_aware_whitening_loss = loss + whitening_loss_term
+            toggle_grad_module(whitening_conv1x1s[layer_name], True)
+            # accuracy_aware_whitening_loss.backward(retain_graph = True)
+            whitening_loss_term.backward(retain_graph = True)
+            toggle_grad_module(whitening_conv1x1s[layer_name], False)
+            # accuracy_aware_whitening_loss.detach_()
+            
+            pbar_descrip = f"CE Loss: {cross_entropy_loss.item()}, Whitening Loss: {whitening_loss_term.item()}"
+            pbar.set_description(pbar_descrip)
 
-        loss.backward(retain_graph = True)
-
-        # Step through whitening conv1x1 optimizers
-        for opt in whitening_optimizers.values():
-            opt.step()
+        # toggle_grad_params(net_params_excluding_whitening_params, True)
+        toggle_grad_module(net, True)
+        loss.backward(retain_graph = False)
         optimizer.step()
+
+        # for opt in whitening_optimizers.values():
+        #     opt.step()
         
         pbar.set_description(pbar_descrip)
 
@@ -116,7 +135,8 @@ def train(epoch):
 
             wandb.log({**kurtosis_kernel_metrics, 
                       **kurtosis_feature_map_metrics, 
-                      **covariance_distance_identity_feature_map_metrics,
+                      # **covariance_distance_identity_feature_map_metrics,
+                      **covariance_distance_identity_whitening_feature_map_metrics,
                       **metrics,
                       **{'train/kurtosis_sum': kurtosis_sum.item() if args.kurtosis_loss else None,
                         'train/kurtosis_loss_term': kurtosis_term.item() if args.kurtosis_loss else None} }) 
@@ -194,6 +214,15 @@ def eval_training(epoch=0, tb=True):
         # covariance_distance_identity_feature_map_metrics = { "test/covariance_dist_from_identity_bn_feature_maps/{}".format(k): \
         #                       compute_feature_map_covariance_distance_from_identity(v).item()  \
         #                       for (k,v) in batch_norm_feature_map_cache.items()} 
+
+        # Calculate covariance losses for conv1x1 whitening layers
+        covariance_distance_identity_whitening_feature_map = { k: compute_feature_map_covariance_distance_from_identity(v)  \
+                              for (k,v) in whitening_conv1x1_feature_map_cache.items()} 
+
+        covariance_distance_identity_whitening_feature_map_metrics = { "test/covariance_dist_from_identity_whitening_feature_maps/{}".format(k): \
+                              v.item()  \
+                              for (k,v) in covariance_distance_identity_whitening_feature_map.items()} 
+        
         
         if args.no_learnable_params_bn and args.no_track_running_stats_bn:
               for (k,v) in batch_norm_feature_map_cache.items():
@@ -202,7 +231,9 @@ def eval_training(epoch=0, tb=True):
         if args.wandb:
             wandb.log({**kurtosis_kernel_metrics, 
                       **kurtosis_feature_map_metrics,
-                      **covariance_distance_identity_feature_map_metrics})
+                      # **covariance_distance_identity_feature_map_metrics
+                      **covariance_distance_identity_whitening_feature_map_metrics
+                      })
 
         cross_entropy_loss = loss_function(outputs, labels)
    
@@ -300,6 +331,7 @@ if __name__ == '__main__':
     #Whitening Args
     parser.add_argument('-post_whitening', action='store_true', default=False, help='')
     parser.add_argument('-pre_whitening', action='store_true', default=False, help='')
+    parser.add_argument('-whitening_strength', type=float, default=None, help='')
     parser.add_argument('-switch_3x3conv2d_and_bn', action='store_true', default=False, help='')
     
     
@@ -329,7 +361,7 @@ if __name__ == '__main__':
     
     for name, layer in net.named_modules():
         if 'whitening' in name:
-            layer.register_forward_hook(cache_intermediate_output(name, conv2d_feature_map_cache))
+            layer.register_forward_hook(cache_intermediate_output(name, whitening_conv1x1_feature_map_cache))
             whitening_conv1x1s[name] = layer
     
     whitening_optimizers = {}
@@ -361,7 +393,16 @@ if __name__ == '__main__':
         shuffle=True
     )
 
+    net_params_excluding_whitening_params = []
+
+    for name, layer in net.named_modules():
+        if 'whitening' not in name:
+            for param in layer.parameters():
+                net_params_excluding_whitening_params.append(param)
+
     loss_function = nn.CrossEntropyLoss()
+    # net_params_excluding_whitening_params
+
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
     train_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=settings.MILESTONES, gamma=0.2) #learning rate decay
     iter_per_epoch = len(cifar100_training_loader)

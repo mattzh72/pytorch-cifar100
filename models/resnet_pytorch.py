@@ -12,7 +12,7 @@ from torchvision.models._api import Weights, WeightsEnum #, register_model
 from torchvision.models._meta import _IMAGENET_CATEGORIES
 from torchvision.models._utils import _ovewrite_named_param, handle_legacy_interface
 
-from utils import feature_map_has_0_mean_1_var
+# from utils import feature_map_has_0_mean_1_var
 
 
 __all__ = [
