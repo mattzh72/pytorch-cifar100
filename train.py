@@ -72,6 +72,10 @@ def train(epoch):
             images = images.cuda()
 
         optimizer.zero_grad()
+        # Zero grad all the whitening layers' optimizers
+        for opt in whitening_optimizers.values():
+            opt.zero_grad()
+        
         outputs = net(images)
         
         kurtosis_conv2d_feature_map = {k:compute_feature_map_kurtosis(v) \
@@ -80,9 +84,9 @@ def train(epoch):
         kurtosis_feature_map_metrics = {"train/kurtosis_conv2d_feature_maps/kurtosis_{}".format(k):v.item() \
                               for (k,v) in kurtosis_conv2d_feature_map.items()} 
 
-      
+        # Calculate conv2d kernel kurtoses
         kurtosis_kernel = compute_all_conv2d_kernel_kurtoses(net)
-
+        # Get .items() for wandb metrics emitting
         kurtosis_kernel_metrics = { "train/kurtosis_conv2d_kernels/kurtosis_{}".format(k):v \
                               for (k,v) in kurtosis_kernel.items()}
 
@@ -90,32 +94,35 @@ def train(epoch):
         #                       compute_feature_map_covariance_distance_from_identity(v).item()  \
         #                       for (k,v) in batch_norm_feature_map_cache.items()} 
 
-        covariance_distance_identity_feature_map_metrics = { "train/covariance_dist_from_identity_bn_feature_maps/{}".format(k): \
-                              compute_feature_map_covariance_distance_from_identity(v).item()  \
+        # Calculate covariance losses for conv1x1 whitening layers
+        covariance_distance_identity_feature_map = { k: compute_feature_map_covariance_distance_from_identity(v)  \
                               for (k,v) in whitening_conv1x1_feature_map_cache.items()} 
         
         if args.no_learnable_params_bn and args.no_track_running_stats_bn:
               for (k,v) in batch_norm_feature_map_cache.items():
                   assert feature_map_has_0_mean_1_var(v)
-                  
        
         cross_entropy_loss = loss_function(outputs, labels)
-   
         pbar_descrip = f"CE Loss: {cross_entropy_loss.item()}"
         if args.kurtosis_loss:
             #kurtosis + cross entropy global loss
             kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
             kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss)
 
-            # constraint = int(cross_entropy_loss < kurtosis_term) * (kurtosis_term - cross_entropy_loss)
-
-            loss = cross_entropy_loss + kurtosis_term # * 0.1 * constraint
+            loss = cross_entropy_loss + kurtosis_term 
             pbar_descrip += f"\tKurtosis Loss: {kurtosis_term.item()}"
         else:
             #cross entropy global loss
             loss = cross_entropy_loss
 
-        loss.backward()
+        # Conduct whitening loss first before CE loss
+        for losses in covariance_distance_identity_feature_map.values():  
+          losses.backward(retain_graph = True)
+        loss.backward(retain_graph = True)
+
+        # Step through whitening conv1x1 optimizers
+        for opt in whitening_optimizers.values():
+            opt.step()
         optimizer.step()
         
         pbar.set_description(pbar_descrip)
@@ -347,16 +354,15 @@ if __name__ == '__main__':
     
 
     whitening_conv1x1_feature_map_cache = {}
-    whitening_layers = {}
-    
+    whitening_conv1x1s = {}
     
     for name, layer in net.named_modules():
         if 'whitening' in name:
             layer.register_forward_hook(cache_intermediate_output(name, conv2d_feature_map_cache))
-            whitening_layers[name] = layer
+            whitening_conv1x1s[name] = layer
     
     whitening_optimizers = {}
-    for name, layer in whitening_layers.items():
+    for name, layer in whitening_conv1x1s.items():
         whitening_optimizers[name] = optim.SGD(layer.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
             
     if args.wandb:

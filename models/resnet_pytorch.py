@@ -93,25 +93,24 @@ class BasicBlock(nn.Module):
         self.switch_3x3conv2d_and_bn = switch_3x3conv2d_and_bn
 
         
-        conv1 = conv3x3(inplanes if not self.switch_3x3conv2d_and_bn else planes, 
-                              planes, 
-                              stride)
+        conv1 = conv3x3(inplanes, planes, stride)
         bn1 = norm_layer(planes if not self.switch_3x3conv2d_and_bn else inplanes, 
                               affine = bn_learnable_affine_params,
                               track_running_stats =  bn_track_running_stats)
         
-        if self.pre_whitening:
-            bn1_whitening = conv1x1(planes, planes, stride = 1)
+        # This is purely for visualization purposes
+        # When printing out the model, the layers will appear in the correct order
+        # that they are created, and we want this to reflect execution order too.
         if self.switch_3x3conv2d_and_bn:
             self.bn1 = bn1
             if self.pre_whitening:
-                self.bn1_whitening = bn1_whitening
+                self.bn1_whitening = conv1x1(inplanes, inplanes, stride = 1)
             self.conv1 = conv1
         else:
             self.conv1 = conv1
             self.bn1 = bn1
             if self.pre_whitening:
-                self.bn1_whitening = bn1_whitening
+                self.bn1_whitening = conv1x1(planes, planes, stride = 1)
         
         
         self.relu = nn.ReLU(inplace=True)
