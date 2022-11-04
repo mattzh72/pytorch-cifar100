@@ -326,111 +326,53 @@ def cache_intermediate_output(name, cache):
       cache[name] = output.clone() 
   return hook
 
-def compute_feature_map_covariance(feature_map):
-    """
-    feature_map: (b x c x h x w)
-    Estimates the covariance matrix of the variables given by the 
-    feature_map matrix, where rows are the variables and columns are the 
-    observations.
-    """
-    assert len(feature_map.shape) == 4
-    b,c,h,w = feature_map.shape
+def initialize_wandb(wandb_obj, settings, args):
+    wandb_obj.init(
+          project="Mehdi", 
+          entity="tejm",
+          config={
+            "epochs": settings.EPOCH,
+            "batch_size": args.b,
+            "lr": args.lr,
+            "warm": args.warm,
+            "bn_learnable_affine_params": not args.no_learnable_params_bn,
+            "bn_track_running_stats": not args.no_track_running_stats_bn,
+            "net": args.net,
+            "kurtosis_loss": args.kurtosis_loss,
+            "kurtosis_global_loss_multiplier": args.kurtosis_global_loss_multiplier,
+            'remove_first_conv2d_for_kurtosis_loss': None if not args.kurtosis_loss \
+                           else args.remove_first_conv2d_for_kurtosis_loss,
+            'add_inverse_kurtosis_loss': None if not args.kurtosis_loss \
+                           else args.add_inverse_kurtosis_loss,
+            'subtract_log_kurtosis_loss': None if not args.kurtosis_loss \
+                           else args.subtract_log_kurtosis_loss,
+            'add_mse_kurtosis_loss': args.add_mse_kurtosis_loss
+            'post_whitening': args.post_whitening,
+            'pre_whitening': args.pre_whitening,
+            'switch_3x3conv2d_and_bn': args.switch_3x3conv2d_and_bn
+          }
+        )
+    wandb_obj.run.summary["best_accuracy"] = 0
+
+
+def get_batch_norm_feature_map_cache(net):
+    batch_norm_feature_map_cache = {}
+    for name, layer in net.named_modules():
+        if isinstance(layer, nn.BatchNorm2d):
+          layer.register_forward_hook(cache_intermediate_output(name, batch_norm_feature_map_cache))
+    return batch_norm_feature_map_cache
+
+def get_conv2d_feature_map_cache_and_name_of_first_conv(net):
+    conv2d_feature_map_cache = {}
+    name_of_first_conv = None
     
-    feature_map_cbhw = torch.permute(feature_map, (1, 0, 2, 3)) # (c x b x h x w)
-    feature_map_collapsed = feature_map_cbhw.reshape(c, b * h * w)
-    
-    covariance_matrix = torch.cov(feature_map_collapsed, correction = 1)
-    assert len(covariance_matrix.shape) == 2 and covariance_matrix.shape[0] == c\
-            and covariance_matrix.shape[1] == c
-
-    return covariance_matrix
-
-
-def feature_map_has_0_mean_1_var(feature_map):
-    """
-    feature_map: (b x c x h x w)
-    """
-    b,c,h,w = feature_map.shape
-    mean_feature_map = torch.mean(feature_map, dim = (0, 2, 3))
-    var_feature_map = torch.var(feature_map, dim = (0, 2, 3))
-
-    # print(mean_feature_map, var_feature_map)
-
-    return_check = torch.isclose(mean_feature_map, torch.zeros(c).cuda(), atol=1e-01).all() \
-            and torch.isclose(var_feature_map, torch.ones(c).cuda(), atol=1e-01).all() or \
-            torch.isnan(mean_feature_map).any() or torch.isnan(var_feature_map).any()
-
-    if not return_check:
-        print(torch.mean(mean_feature_map), torch.mean(var_feature_map), feature_map.shape)
-    return return_check
-def compute_feature_map_covariance_distance_from_identity(feature_map):
-    """
-    feature_map: (b x c x h x w)
-    """
-    b,c,h,w = feature_map.shape
-
-    
-    # assert feature_map_has_0_mean_1_var(feature_map)
-    
-    
-    covariance_matrix = compute_feature_map_covariance(feature_map)
-    distance = torch.linalg.norm(covariance_matrix - torch.eye(c).cuda())
-
-    return distance
-
-
-
-def compute_all_conv2d_kernel_kurtoses(net):
-    kernels = {}
     for name, layer in net.named_modules():
         if isinstance(layer, nn.Conv2d):
-            params = list(layer.parameters())
-            assert len(params) == 1
-            kernels[name] = compute_kernel_kurtosis(params[0])
-    # print([(k, compute_kernel_kurtosis(v)) for k,v in kernels.items()])
-
-    return kernels
-
-def compute_kernel_kurtosis(kernel):
-  """
-    kernel: (n x c x h x w)
-  """
-  assert len(kernel.shape) == 4
-
-  (n, c, h, w) = kernel.shape
-  kernel_hw_collapsed = kernel.reshape(n, c * h * w)
-  mean = torch.mean(kernel_hw_collapsed, dim=0) # c * h * w
-  assert len(mean.shape)==1 and mean.shape[0]== c * h * w
-  diffs = torch.linalg.norm(kernel_hw_collapsed - mean, dim=-1) # n
-  assert len(diffs.shape)==1 and diffs.shape[0]==n
-  var = torch.mean(torch.pow(diffs, 2.0), dim=-1) # 1
-  assert len(var.shape) == 0 #and var.shape[0] == 1, var.shape
-  zscores = (diffs / torch.pow(var, 0.5)) # n
-  assert len(zscores.shape) == 1 and zscores.shape[0] == n
-  kurt = torch.mean(torch.pow(zscores, 4.0), dim=-1) # 1
-  assert len(kurt.shape) == 0 #and kurt.shape[0] == 1, kurt
-  
+            if 'conv' in name:
+                layer.register_forward_hook(cache_intermediate_output(name, conv2d_feature_map_cache))
+                if name_of_first_conv is None:
+                    name_of_first_conv = name
+    return conv2d_feature_map_cache, name_of_first_conv
 
 
-  # print(zscores.shape, channel_kurt.shape, var.shape, diffs.shape, mean.shape)
 
-  return kurt
-def compute_feature_map_kurtosis(feature_map):
-  """
-    feature_map: (b x c x h x w)
-  """
-  assert len(feature_map.shape) == 4
-
-  (b, c, h, w) = feature_map.shape
-  feature_map_hw_collapsed = feature_map.reshape(b, c, h * w)
-  mean = torch.mean(feature_map_hw_collapsed, dim=1).unsqueeze(dim=1) # b x 1 x h*w
-  diffs = torch.linalg.norm(feature_map_hw_collapsed - mean, dim=-1) # b x c
-  var = torch.mean(torch.pow(diffs, 2.0), dim=1).unsqueeze(dim=1) # b x 1
-  zscores = (diffs / torch.pow(var, 0.5)).squeeze() # b x c
-  channel_kurt = torch.mean(torch.pow(zscores, 4.0), dim=1) # b
-  
-
-
-  # print(zscores.shape, channel_kurt.shape, var.shape, diffs.shape, mean.shape)
-
-  return torch.mean(channel_kurt) 

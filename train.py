@@ -26,40 +26,16 @@ from torch.utils.tensorboard import SummaryWriter
 from conf import settings
 from utils import get_network, get_training_dataloader, get_test_dataloader, WarmUpLR, \
     most_recent_folder, most_recent_weights, last_epoch, best_acc_weights, cache_intermediate_output, \
-    compute_feature_map_kurtosis, compute_kernel_kurtosis, compute_all_conv2d_kernel_kurtoses, \
-    compute_feature_map_covariance_distance_from_identity, feature_map_has_0_mean_1_var
+    initialize_wandb, get_batch_norm_feature_map_cache, get_conv2d_feature_map_cache_and_name_of_first_conv
+    
 
-def compute_kurtosis_sum(kurtosis_conv2d_feature_map):
-    kurtosis_sum = 0
-            
-    for name,val in kurtosis_conv2d_feature_map.items():
-        if name == name_of_first_conv and args.remove_first_conv2d_for_kurtosis_loss:
-            pass
-        else:
-            kurtosis_sum = kurtosis_sum + val
-    return kurtosis_sum
+from kurtosis_loss_utils import compute_kurtosis_sum, compute_kurtosis_term, \
+    compute_feature_map_kurtosis, compute_all_conv2d_kernel_kurtoses, \
+    compute_kernel_kurtosis
 
-def compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss):
-    # Select log kurtosis penalty
-    if args.subtract_log_kurtosis_loss:
-        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
-        kurtosis_term = -1 * torch.log(kurtosis_sum)
-    # Select inverse kurtosis penalty
-    elif args.add_inverse_kurtosis_loss:
-        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
-        kurtosis_term = 1/kurtosis_sum
-    elif args.add_mse_kurtosis_loss != None:
-        loss = nn.MSELoss()
-        # If flag is set, discard first conv2d outputs
-        if args.remove_first_conv2d_for_kurtosis_loss:
-          kurtoses = [v for (k,v) in kurtosis_conv2d_feature_map.items() if k != name_of_first_conv]
-        else:
-          kurtoses = list(kurtosis_conv2d_feature_map.values())
-        kurtoses = torch.stack(kurtoses)
-        kurtosis_term = loss(kurtoses, torch.ones(kurtoses.shape[0]).cuda() * args.add_mse_kurtosis_loss)
-    else:
-        raise Error()
-    return kurtosis_term * args.kurtosis_global_loss_multiplier
+from whitening_loss_utils import compute_feature_map_covariance_distance_from_identity, \
+      feature_map_has_0_mean_1_var
+
 
 def train(epoch):
     start = time.time()
@@ -95,7 +71,7 @@ def train(epoch):
         #                       for (k,v) in batch_norm_feature_map_cache.items()} 
 
         # Calculate covariance losses for conv1x1 whitening layers
-        covariance_distance_identity_feature_map = { k: compute_feature_map_covariance_distance_from_identity(v)  \
+        covariance_distance_identity_whitening_feature_map = { k: compute_feature_map_covariance_distance_from_identity(v)  \
                               for (k,v) in whitening_conv1x1_feature_map_cache.items()} 
         
         if args.no_learnable_params_bn and args.no_track_running_stats_bn:
@@ -106,8 +82,8 @@ def train(epoch):
         pbar_descrip = f"CE Loss: {cross_entropy_loss.item()}"
         if args.kurtosis_loss:
             #kurtosis + cross entropy global loss
-            kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
-            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss)
+            kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map, args)
+            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss, args)
 
             loss = cross_entropy_loss + kurtosis_term 
             pbar_descrip += f"\tKurtosis Loss: {kurtosis_term.item()}"
@@ -116,8 +92,10 @@ def train(epoch):
             loss = cross_entropy_loss
 
         # Conduct whitening loss first before CE loss
-        for losses in covariance_distance_identity_feature_map.values():  
-          losses.backward(retain_graph = True)
+        for distance in covariance_distance_identity_whitening_feature_map.values(): 
+            # accuracy_aware_whitening_loss = cross_entropy_loss + 
+            distance.backward(retain_graph = True)
+
         loss.backward(retain_graph = True)
 
         # Step through whitening conv1x1 optimizers
@@ -230,8 +208,8 @@ def eval_training(epoch=0, tb=True):
    
         if args.kurtosis_loss:
             #kurtosis + cross entropy global loss
-            kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
-            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss)
+            kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map, args)
+            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss, args)
                         
             loss = cross_entropy_loss + kurtosis_term
         else:
@@ -342,16 +320,9 @@ if __name__ == '__main__':
     assert bool(args.kurtosis_loss) == bool(args.kurtosis_global_loss_multiplier)    
 
     net = get_network(args)
-    conv2d_feature_map_cache = {}
-    name_of_first_conv = None
     
-    for name, layer in net.named_modules():
-        if isinstance(layer, nn.Conv2d):
-            if 'conv' in name:
-                layer.register_forward_hook(cache_intermediate_output(name, conv2d_feature_map_cache))
-                if name_of_first_conv is None:
-                    name_of_first_conv = name
-    
+    conv2d_feature_map_cache, args.name_of_first_conv \
+                = get_conv2d_feature_map_cache_and_name_of_first_conv(net)
 
     whitening_conv1x1_feature_map_cache = {}
     whitening_conv1x1s = {}
@@ -369,11 +340,7 @@ if __name__ == '__main__':
         import wandb
 
     #set up intermediate layer feature map caching
-    batch_norm_feature_map_cache = {}
-    for name, layer in net.named_modules():
-        if isinstance(layer, nn.BatchNorm2d):
-          # moe
-          layer.register_forward_hook(cache_intermediate_output(name, batch_norm_feature_map_cache))
+    batch_norm_feature_map_cache = get_batch_norm_feature_map_cache(net)
     
     
 
@@ -451,30 +418,8 @@ if __name__ == '__main__':
         resume_epoch = last_epoch(os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder))
 
     if args.wandb:
-        wandb.init(
-          project="Mehdi", 
-          entity="tejm",
-          config={
-            "epochs": settings.EPOCH,
-            "batch_size": args.b,
-            "lr": args.lr,
-            "warm": args.warm,
-            "bn_learnable_affine_params": not args.no_learnable_params_bn,
-            "bn_track_running_stats": not args.no_track_running_stats_bn,
-            "net": args.net,
-            "kurtosis_loss": args.kurtosis_loss,
-            "kurtosis_global_loss_multiplier": args.kurtosis_global_loss_multiplier,
-            'remove_first_conv2d_for_kurtosis_loss': None if not args.kurtosis_loss \
-                           else args.remove_first_conv2d_for_kurtosis_loss,
-            'add_inverse_kurtosis_loss': None if not args.kurtosis_loss \
-                           else args.add_inverse_kurtosis_loss,
-            'subtract_log_kurtosis_loss': None if not args.kurtosis_loss \
-                           else args.subtract_log_kurtosis_loss,
-            'add_mse_kurtosis_loss': args.add_mse_kurtosis_loss
-          }
-        )
-
-        wandb.run.summary["best_accuracy"] = 0
+        initialize_wandb()
+        
     for epoch in range(1, settings.EPOCH + 1):
         if epoch > args.warm:
             train_scheduler.step(epoch)
