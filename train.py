@@ -72,9 +72,6 @@ def train(epoch):
         #                       for (k,v) in batch_norm_feature_map_cache.items()} 
 
         # Calculate covariance losses for conv1x1 whitening layers
-        # print("len keys",len(whitening_conv1x1_feature_map_cache.keys()))
-        # print(whitening_conv1x1_feature_map_cache.keys())
-        # assert False
         covariance_distance_identity_whitening_feature_map = { k: compute_feature_map_covariance_distance_from_identity(v)  \
                               for (k,v) in whitening_conv1x1_feature_map_cache.items()} 
 
