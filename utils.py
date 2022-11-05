@@ -363,6 +363,7 @@ def get_batch_norm_feature_map_cache(net):
           layer.register_forward_hook(cache_intermediate_output(name, batch_norm_feature_map_cache))
     return batch_norm_feature_map_cache
 
+
 def get_conv2d_feature_map_cache_and_name_of_first_conv(net):
     conv2d_feature_map_cache = {}
     name_of_first_conv = None
@@ -379,7 +380,23 @@ def get_conv2d_feature_map_cache_and_name_of_first_conv(net):
 def toggle_grad_module(module, gradStatus):
     for param in module.parameters():
         param.requires_grad = gradStatus
+
+
 def toggle_grad_params(params, gradStatus):
     for p in params:
         p.requires_grad = gradStatus
+
+
+def get_statistics_from_layer_cache(cache, statistics_func, metrics_name_template=None):
+    statistics = {k:statistics_func(v) \
+                          for (k,v) in cache.items()} 
+    
+    if metrics_name_template != None: 
+      metrics = {metrics_name_template.format(k):v.item() \
+                          for (k,v) in statistics.items()}
+
+      return statistics, metrics 
+    else:
+      return statistics
+
 

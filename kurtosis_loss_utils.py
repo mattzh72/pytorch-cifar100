@@ -70,16 +70,49 @@ def compute_kernel_kurtosis(kernel):
   # print(zscores.shape, channel_kurt.shape, var.shape, diffs.shape, mean.shape)
 
   return kurt
+
+def make_feature_map_0_mean_1_var(feature_map):
+    """
+    feature_map: (b x c x h x w)
+    """
+    b,c,h,w = feature_map.shape
+    mean_feature_map = torch.mean(feature_map, dim = (0, 2, 3), keepdim=True)
+    std_feature_map = torch.std(feature_map, dim = (0, 2, 3), keepdim=True)
+
+
+    return (feature_map - mean_feature_map)/std_feature_map
+
+
+def feature_map_has_0_mean_1_var(feature_map, atol=1e-1):
+    """
+    feature_map: (b x c x h x w)
+    """
+    b,c,h,w = feature_map.shape
+    mean_feature_map = torch.mean(feature_map, dim = (0, 2, 3))
+    var_feature_map = torch.var(feature_map, dim = (0, 2, 3))
+
+    # print(mean_feature_map, var_feature_map)
+
+    return_check = torch.isclose(mean_feature_map, torch.zeros(c).cuda(), atol=atol).all() \
+            and torch.isclose(var_feature_map, torch.ones(c).cuda(), atol=atol).all() or \
+            torch.isnan(mean_feature_map).any() or torch.isnan(var_feature_map).any()
+
+    return return_check
+
+
 def compute_feature_map_kurtosis(feature_map):
   """
     feature_map: (b x c x h x w)
   """
   assert len(feature_map.shape) == 4
 
-  (b, c, h, w) = feature_map.shape
-  feature_map_hw_collapsed = feature_map.reshape(b, c, h * w)
-  mean = torch.mean(feature_map_hw_collapsed, dim=1).unsqueeze(dim=1) # b x 1 x h*w
-  diffs = torch.linalg.norm(feature_map_hw_collapsed - mean, dim=-1) # b x c
+  normalized_feature_map = make_feature_map_0_mean_1_var(feature_map)
+  # assert feature_map_has_0_mean_1_var(normalized_feature_map)
+
+  (b, c, h, w) = normalized_feature_map.shape
+  normalized_feature_map_hw_collapsed = normalized_feature_map.reshape(b, c, h * w)
+  mean = torch.mean(normalized_feature_map_hw_collapsed, dim=1).unsqueeze(dim=1) # b x 1 x h*w
+  diffs = torch.linalg.norm(normalized_feature_map_hw_collapsed - mean, dim=-1) # b x c
   var = torch.mean(torch.pow(diffs, 2.0), dim=1).unsqueeze(dim=1) # b x 1
   zscores = (diffs / torch.pow(var, 0.5)).squeeze() # b x c
   channel_kurt = torch.mean(torch.pow(zscores, 4.0), dim=1) # b
@@ -89,3 +122,4 @@ def compute_feature_map_kurtosis(feature_map):
   # print(zscores.shape, channel_kurt.shape, var.shape, diffs.shape, mean.shape)
 
   return torch.mean(channel_kurt) 
+

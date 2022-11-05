@@ -21,21 +21,19 @@ import torchvision
 import torchvision.transforms as transforms
 
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 
 from conf import settings
 from utils import get_network, get_training_dataloader, get_test_dataloader, WarmUpLR, \
     most_recent_folder, most_recent_weights, last_epoch, best_acc_weights, cache_intermediate_output, \
     initialize_wandb, get_batch_norm_feature_map_cache, get_conv2d_feature_map_cache_and_name_of_first_conv, \
-    toggle_grad_module, toggle_grad_params
+    toggle_grad_module, toggle_grad_params, get_statistics_from_layer_cache
     
-
 from kurtosis_loss_utils import compute_kurtosis_sum, compute_kurtosis_term, \
     compute_feature_map_kurtosis, compute_all_conv2d_kernel_kurtoses, \
     compute_kernel_kurtosis
 
 from whitening_loss_utils import compute_feature_map_covariance_distance_from_identity, \
-      feature_map_has_0_mean_1_var
+      feature_map_has_0_mean_1_var, get_whitening_conv1x1_feature_map_cache, get_whitening_conv1x1s
 
 
 def train(epoch):
@@ -49,75 +47,60 @@ def train(epoch):
             images = images.cuda()
 
         optimizer.zero_grad()
-        # Zero grad all the whitening layers' optimizers
-        for opt in whitening_optimizers.values():
-            opt.zero_grad()
         
         outputs = net(images)
         
-        kurtosis_conv2d_feature_map = {k:compute_feature_map_kurtosis(v) \
-                              for (k,v) in conv2d_feature_map_cache.items()} 
+        # Get kurtosis statistics for feature maps of conv2d layers
+        kurtosis_conv2d_fm, kurtosis_conv2d_metrics = {}, {}
+        if args.kurtosis_loss:
+          kurtosis_conv2d_fm, kurtosis_conv2d_metrics = get_statistics_from_layer_cache(
+            conv2d_feature_map_cache, 
+            statistics_func=compute_feature_map_kurtosis, 
+            metrics_name_template="train/kurtosis_conv2d_fm/kurtosis_{}")
 
-        kurtosis_feature_map_metrics = {"train/kurtosis_conv2d_feature_maps/kurtosis_{}".format(k):v.item() \
-                              for (k,v) in kurtosis_conv2d_feature_map.items()} 
-
-        # Calculate conv2d kernel kurtoses
-        kurtosis_kernel = compute_all_conv2d_kernel_kurtoses(net)
-        # Get .items() for wandb metrics emitting
-        kurtosis_kernel_metrics = { "train/kurtosis_conv2d_kernels/kurtosis_{}".format(k):v \
-                              for (k,v) in kurtosis_kernel.items()}
-
-        # covariance_distance_identity_feature_map_metrics = { "train/covariance_dist_from_identity_bn_feature_maps/{}".format(k): \
-        #                       compute_feature_map_covariance_distance_from_identity(v).item()  \
-        #                       for (k,v) in batch_norm_feature_map_cache.items()} 
-
-        # Calculate covariance losses for conv1x1 whitening layers
-        covariance_distance_identity_whitening_feature_map = { k: compute_feature_map_covariance_distance_from_identity(v)  \
-                              for (k,v) in whitening_conv1x1_feature_map_cache.items()} 
-
-        covariance_distance_identity_whitening_feature_map_metrics = { "train/covariance_dist_from_identity_whitening_feature_maps/{}".format(k): \
-                              v.item()  \
-                              for (k,v) in covariance_distance_identity_whitening_feature_map.items()} 
+        # Get covariance statistics for conv1x1 layers feature map 
+        covariance_distance_identity_whitening_feature_map, covariance_distance_identity_whitening_feature_map_metrics = {}, {}
+        if args.whitening_strength != None:
+          covariance_distance_identity_whitening_feature_map, covariance_distance_identity_whitening_feature_map_metrics = get_statistics_from_layer_cache(
+            whitening_conv1x1_feature_map_cache, 
+            statistics_func=compute_feature_map_covariance_distance_from_identity, 
+            metrics_name_template="train/covariance_dist_from_identity_whitening_feature_maps/{}")
         
-        if args.no_learnable_params_bn and args.no_track_running_stats_bn:
-              for (k,v) in batch_norm_feature_map_cache.items():
-                  assert feature_map_has_0_mean_1_var(v)
-       
+        if args.norm_checks and args.no_learnable_params_bn and args.no_track_running_stats_bn:
+            for (k,v) in batch_norm_feature_map_cache.items():
+                assert feature_map_has_0_mean_1_var(v)
+      
         cross_entropy_loss = loss_function(outputs, labels)
         pbar_descrip = f"CE Loss: {cross_entropy_loss.item()}"
         if args.kurtosis_loss:
             #kurtosis + cross entropy global loss
-            kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map, args)
-            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss, args)
+            kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_fm, args)
+            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_fm, cross_entropy_loss, args)
 
             loss = cross_entropy_loss + kurtosis_term 
             pbar_descrip += f"\tKurtosis Loss: {kurtosis_term.item()}"
+            pbar_descrip += f"\tKurtosis Sum: {kurtosis_sum.item()}"
         else:
             #cross entropy global loss
             loss = cross_entropy_loss
-        
-        toggle_grad_module(net, False)
-        # Conduct whitening loss first before CE loss
-        for layer_name, distance in covariance_distance_identity_whitening_feature_map.items():
-            # whitening_loss_term = torch.log(args.whitening_strength*distance)
-            whitening_loss_term = args.whitening_strength*distance
-            accuracy_aware_whitening_loss = loss + whitening_loss_term
-            toggle_grad_module(whitening_conv1x1s[layer_name], True)
-            # accuracy_aware_whitening_loss.backward(retain_graph = True)
-            whitening_loss_term.backward(retain_graph = True)
-            toggle_grad_module(whitening_conv1x1s[layer_name], False)
-            # accuracy_aware_whitening_loss.detach_()
-            
-            pbar_descrip = f"CE Loss: {cross_entropy_loss.item()}, Whitening Loss: {whitening_loss_term.item()}"
-            pbar.set_description(pbar_descrip)
 
-        # toggle_grad_params(net_params_excluding_whitening_params, True)
-        toggle_grad_module(net, True)
+        if args.whitening_strength != None:
+          toggle_grad_module(net, False)
+          # Conduct whitening loss first before CE loss
+          for layer_name, distance in covariance_distance_identity_whitening_feature_map.items():
+              whitening_loss_term = args.whitening_strength*distance
+              toggle_grad_module(whitening_conv1x1s[layer_name], True)
+              whitening_loss_term.backward(retain_graph = True)
+              toggle_grad_module(whitening_conv1x1s[layer_name], False)
+              
+              pbar_descrip += f"\tWhitening Loss: {whitening_loss_term.item()}"
+              pbar.set_description(pbar_descrip)
+
+          toggle_grad_module(net, True)
+
+
         loss.backward(retain_graph = False)
         optimizer.step()
-
-        # for opt in whitening_optimizers.values():
-        #     opt.step()
         
         pbar.set_description(pbar_descrip)
 
@@ -130,8 +113,7 @@ def train(epoch):
               "train/global_loss": loss.item()
             }
 
-            wandb.log({**kurtosis_kernel_metrics, 
-                      **kurtosis_feature_map_metrics, 
+            wandb.log({**kurtosis_conv2d_metrics, 
                       # **covariance_distance_identity_feature_map_metrics,
                       **covariance_distance_identity_whitening_feature_map_metrics,
                       **metrics,
@@ -139,13 +121,6 @@ def train(epoch):
                         'train/kurtosis_loss_term': kurtosis_term.item() if args.kurtosis_loss else None} }) 
 
         n_iter = (epoch - 1) * len(cifar100_training_loader) + batch_index + 1
-
-        last_layer = list(net.children())[-1]
-        for name, para in last_layer.named_parameters():
-            if 'weight' in name:
-                writer.add_scalar('LastLayerGradients/grad_norm2_weights', para.grad.norm(), n_iter)
-            if 'bias' in name:
-                writer.add_scalar('LastLayerGradients/grad_norm2_bias', para.grad.norm(), n_iter)
 
         if args.verbose: 
           print('Training Epoch: {epoch} [{trained_samples}/{total_samples}]\tGlobal Loss: {:0.4f}\tCE_loss: {:0.4f}\tKurtosis_loss: {:0.4f}\tLR: {:0.6f}'.format(
@@ -158,16 +133,8 @@ def train(epoch):
               total_samples=len(cifar100_training_loader.dataset)
           ))
 
-        #update training loss for each iteration
-        writer.add_scalar('Train/loss', loss.item(), n_iter)
-
         if epoch <= args.warm:
             warmup_scheduler.step()
-
-    for name, param in net.named_parameters():
-        layer, attr = os.path.splitext(name)
-        attr = attr[1:]
-        writer.add_histogram("{}/{}".format(layer, attr), param, epoch)
 
     finish = time.time()
 
@@ -195,39 +162,31 @@ def eval_training(epoch=0, tb=True):
 
         outputs = net(images)
 
-        
-        kurtosis_conv2d_feature_map = {k:compute_feature_map_kurtosis(v) \
-                              for (k,v) in conv2d_feature_map_cache.items()} 
+        # Get kurtosis statistics for feature maps of conv2d layers
+        kurtosis_conv2d_fm, kurtosis_conv2d_metrics = get_statistics_from_layer_cache(
+          conv2d_feature_map_cache, 
+          statistics_func=compute_feature_map_kurtosis, 
+          metrics_name_template="test/kurtosis_conv2d_fm/kurtosis_{}")
 
-        kurtosis_feature_map_metrics = {"test/kurtosis_conv2d_feature_maps/kurtosis_{}".format(k):v.item() \
-                              for (k,v) in kurtosis_conv2d_feature_map.items()} 
+        # # Calculate conv2d kernel kurtoses
+        # kurtosis_kernel = compute_all_conv2d_kernel_kurtoses(net)
+        # # Get .items() for wandb metrics emitting
+        # kurtosis_kernel_metrics = { "test/kurtosis_conv2d_kernels/kurtosis_{}".format(k):v \
+        #                       for (k,v) in kurtosis_kernel.items()}
 
-      
-        kurtosis_kernel = compute_all_conv2d_kernel_kurtoses(net)
-
-        kurtosis_kernel_metrics = { "test/kurtosis_conv2d_kernels/kurtosis_{}".format(k):v \
-                              for (k,v) in kurtosis_kernel.items()}
-
-        # covariance_distance_identity_feature_map_metrics = { "test/covariance_dist_from_identity_bn_feature_maps/{}".format(k): \
-        #                       compute_feature_map_covariance_distance_from_identity(v).item()  \
-        #                       for (k,v) in batch_norm_feature_map_cache.items()} 
-
-        # Calculate covariance losses for conv1x1 whitening layers
-        covariance_distance_identity_whitening_feature_map = { k: compute_feature_map_covariance_distance_from_identity(v)  \
-                              for (k,v) in whitening_conv1x1_feature_map_cache.items()} 
-
-        covariance_distance_identity_whitening_feature_map_metrics = { "test/covariance_dist_from_identity_whitening_feature_maps/{}".format(k): \
-                              v.item()  \
-                              for (k,v) in covariance_distance_identity_whitening_feature_map.items()} 
-        
-        
-        if args.no_learnable_params_bn and args.no_track_running_stats_bn:
+        covariance_distance_identity_whitening_feature_map, covariance_distance_identity_whitening_feature_map_metrics = {}, {}
+        if args.whitening_strength != None:
+          covariance_distance_identity_whitening_feature_map, covariance_distance_identity_whitening_feature_map_metrics = get_statistics_from_layer_cache(
+            whitening_conv1x1_feature_map_cache, 
+            statistics_func=compute_feature_map_covariance_distance_from_identity, 
+            metrics_name_template="test/covariance_dist_from_identity_whitening_feature_maps/{}")
+            
+        if args.norm_checks and args.no_learnable_params_bn and args.no_track_running_stats_bn:
               for (k,v) in batch_norm_feature_map_cache.items():
                   assert feature_map_has_0_mean_1_var(v)
             
         if args.wandb:
-            wandb.log({**kurtosis_kernel_metrics, 
-                      **kurtosis_feature_map_metrics,
+            wandb.log({**kurtosis_conv2d_metrics, 
                       # **covariance_distance_identity_feature_map_metrics
                       **covariance_distance_identity_whitening_feature_map_metrics
                       })
@@ -236,19 +195,15 @@ def eval_training(epoch=0, tb=True):
    
         if args.kurtosis_loss:
             #kurtosis + cross entropy global loss
-            kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map, args)
-            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss, args)
+            kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_fm, args)
+            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_fm, cross_entropy_loss, args)
                         
             loss = cross_entropy_loss + kurtosis_term
         else:
             #cross entropy global loss
             loss = cross_entropy_loss
 
-
-        # test_loss += loss.item() 
         test_loss += loss.item() * len(images)/len(cifar100_test_loader.dataset)
-
-        
         test_average_cross_entropy_term += cross_entropy_loss.item() * len(images)/len(cifar100_test_loader.dataset)
 
         if args.kurtosis_loss: 
@@ -295,11 +250,6 @@ def eval_training(epoch=0, tb=True):
                   'test/average_kurtosis_sum': test_average_kurtosis_sum if args.kurtosis_loss else None,
                   'test/average_kurtosis_loss_term': test_average_kurtosis_term if args.kurtosis_loss else None})
 
-    #add informations to tensorboard
-    if tb:
-        writer.add_scalar('Test/Average loss', test_loss / len(cifar100_test_loader.dataset), epoch)
-        writer.add_scalar('Test/Accuracy', test_correct.float() / len(cifar100_test_loader.dataset), epoch)
-
     return test_correct.float() / len(cifar100_test_loader.dataset)
 
 if __name__ == '__main__':
@@ -309,21 +259,19 @@ if __name__ == '__main__':
     parser.add_argument('-b', type=int, default=128, help='batch size for dataloader')
     parser.add_argument('-warm', type=int, default=1, help='warm up training phase')
     parser.add_argument('-lr', type=float, default=0.1, help='initial learning rate')
-    parser.add_argument('-resume', action='store_true', default=False, help='resume training')
     parser.add_argument('-no_learnable_params_bn', action='store_true', default=False, help='')
     parser.add_argument('-no_track_running_stats_bn', action='store_true', default=False, help='')
     parser.add_argument('-wandb', action='store_true', default=False, help='weights and biases is used')
     parser.add_argument('-verbose', action='store_true', default=False, help='whether or not to print')
+    parser.add_argument('-norm-checks', action='store_true', default=False, help='whether to check for correct normalization')
 
-    ##Kurtosis Args
+    #Kurtosis Args
     parser.add_argument('-kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-kurtosis_global_loss_multiplier', type=float, default=None, help='hyperparameter multiplier for kurtosis loss term in global loss')
     parser.add_argument('-remove_first_conv2d_for_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-subtract_log_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-add_inverse_kurtosis_loss', action='store_true', default=False, help='')
-    parser.add_argument('-add_mse_kurtosis_loss', type=float, default=None, help='')
-    parser.add_argument('-checkpoint', action='store_true', default=False, help='store checkpoints')
-    
+    parser.add_argument('-add_mse_kurtosis_loss', type=float, default=None, help='')    
     
     #Whitening Args
     parser.add_argument('-post_whitening', action='store_true', default=False, help='')
@@ -353,17 +301,9 @@ if __name__ == '__main__':
     conv2d_feature_map_cache, args.name_of_first_conv \
                 = get_conv2d_feature_map_cache_and_name_of_first_conv(net)
 
-    whitening_conv1x1_feature_map_cache = {}
-    whitening_conv1x1s = {}
-    
-    for name, layer in net.named_modules():
-        if 'whitening' in name:
-            layer.register_forward_hook(cache_intermediate_output(name, whitening_conv1x1_feature_map_cache))
-            whitening_conv1x1s[name] = layer
-    
-    whitening_optimizers = {}
-    for name, layer in whitening_conv1x1s.items():
-        whitening_optimizers[name] = optim.SGD(layer.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+    if args.whitening_strength != None:
+      whitening_conv1x1_feature_map_cache = get_whitening_conv1x1_feature_map_cache(net)
+      whitening_conv1x1s, net_params_excluding_whitening_params = get_whitening_conv1x1s(net, get_excluded_layers=True)
             
     if args.wandb:
         import wandb
@@ -371,8 +311,6 @@ if __name__ == '__main__':
     #set up intermediate layer feature map caching
     batch_norm_feature_map_cache = get_batch_norm_feature_map_cache(net)
     
-    
-
     #data preprocessing:
     cifar100_training_loader = get_training_dataloader(
         settings.CIFAR100_TRAIN_MEAN,
@@ -390,70 +328,14 @@ if __name__ == '__main__':
         shuffle=True
     )
 
-    net_params_excluding_whitening_params = []
-
-    for name, layer in net.named_modules():
-        if 'whitening' not in name:
-            for param in layer.parameters():
-                net_params_excluding_whitening_params.append(param)
-
     loss_function = nn.CrossEntropyLoss()
-    # net_params_excluding_whitening_params
 
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
     train_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=settings.MILESTONES, gamma=0.2) #learning rate decay
     iter_per_epoch = len(cifar100_training_loader)
     warmup_scheduler = WarmUpLR(optimizer, iter_per_epoch * args.warm)
 
-    if args.resume:
-        recent_folder = most_recent_folder(os.path.join(settings.CHECKPOINT_PATH, args.net), fmt=settings.DATE_FORMAT)
-        if not recent_folder:
-            raise Exception('no recent folder were found')
-
-        checkpoint_path = os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder)
-
-    else:
-        checkpoint_path = os.path.join(settings.CHECKPOINT_PATH, args.net, settings.TIME_NOW)
-
-    #use tensorboard
-    if not os.path.exists(settings.LOG_DIR):
-        os.mkdir(settings.LOG_DIR)
-
-    #since tensorboard can't overwrite old values
-    #so the only way is to create a new tensorboard log
-    writer = SummaryWriter(log_dir=os.path.join(
-            settings.LOG_DIR, args.net, settings.TIME_NOW))
-    input_tensor = torch.Tensor(1, 3, 32, 32)
-    if args.gpu:
-        input_tensor = input_tensor.cuda()
-    writer.add_graph(net, input_tensor)
-
-    #create checkpoint folder to save model
-    if args.checkpoint:
-      if not os.path.exists(checkpoint_path):
-          os.makedirs(checkpoint_path)
-      checkpoint_path = os.path.join(checkpoint_path, '{net}-{epoch}-{type}.pth')
-
     best_acc = 0.0
-    
-    if args.resume:
-        best_weights = best_acc_weights(os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder))
-        if best_weights:
-            weights_path = os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder, best_weights)
-            print('found best acc weights file:{}'.format(weights_path))
-            print('load best training file to test acc...')
-            net.load_state_dict(torch.load(weights_path))
-            best_acc = eval_training(tb=False)
-            print('best acc is {:0.2f}'.format(best_acc))
-
-        recent_weights_file = most_recent_weights(os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder))
-        if not recent_weights_file:
-            raise Exception('no recent weights file were found')
-        weights_path = os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder, recent_weights_file)
-        print('loading weights file {} to resume training.....'.format(weights_path))
-        net.load_state_dict(torch.load(weights_path))
-
-        resume_epoch = last_epoch(os.path.join(settings.CHECKPOINT_PATH, args.net, recent_folder))
 
     if args.wandb:
         initialize_wandb(wandb, settings, args)
@@ -462,30 +344,11 @@ if __name__ == '__main__':
         if epoch > args.warm:
             train_scheduler.step(epoch)
 
-        if args.resume:
-            if epoch <= resume_epoch:
-                continue
-
         train(epoch)
 
         acc = eval_training(epoch)
         if args.wandb:
             wandb.run.summary["best_accuracy"] = acc if acc > wandb.run.summary["best_accuracy"] else wandb.run.summary["best_accuracy"]
-
-        #start to save best performance model after learning rate decay to 0.01
-        if args.checkpoint and epoch > settings.MILESTONES[1] and best_acc < acc:
-            weights_path = checkpoint_path.format(net=args.net, epoch=epoch, type='best')
-            print('saving weights file to {}'.format(weights_path))
-            torch.save(net.state_dict(), weights_path)
-            best_acc = acc
-            continue
-
-        if args.checkpoint and not epoch % settings.SAVE_EPOCH:
-            weights_path = checkpoint_path.format(net=args.net, epoch=epoch, type='regular')
-            print('saving weights file to {}'.format(weights_path))
-            torch.save(net.state_dict(), weights_path)
-
-    writer.close()
 
     if args.wandb:
 

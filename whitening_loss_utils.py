@@ -1,5 +1,7 @@
 import torch
 
+from utils import cache_intermediate_output
+
 def compute_feature_map_covariance(feature_map):
     """
     feature_map: (b x c x h x w)
@@ -37,6 +39,8 @@ def feature_map_has_0_mean_1_var(feature_map):
     if not return_check:
         print(torch.mean(mean_feature_map), torch.mean(var_feature_map), feature_map.shape)
     return return_check
+
+
 def compute_feature_map_covariance_distance_from_identity(feature_map, normalize_by_channels = True):
     """
     feature_map: (b x c x h x w)
@@ -51,7 +55,29 @@ def compute_feature_map_covariance_distance_from_identity(feature_map, normalize
     
     distance = torch.linalg.norm(covariance_matrix - torch.eye(c).cuda())
 
+    #get rid of off_diagonal entries
+
     if normalize_by_channels:
         distance = distance/(c**2)
 
     return distance
+
+
+def get_whitening_conv1x1s(net, get_excluded_layers=False):
+    whitening_conv1x1s = {}
+    excluded = []
+    for name, layer in net.named_modules():
+        if 'whitening' in name:
+          whitening_conv1x1s[name] = layer
+        else:
+          excluded.append(layer)
+
+    return whitening_conv1x1s, excluded
+
+
+def get_whitening_conv1x1_feature_map_cache(net):
+    whitening_conv1x1_feature_map_cache = {}
+    for name, layer in get_whitening_conv1x1s(net):
+        layer.register_forward_hook(cache_intermediate_output(name, whitening_conv1x1_feature_map_cache))
+
+    return whitening_conv1x1_feature_map_cache
