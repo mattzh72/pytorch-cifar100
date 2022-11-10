@@ -51,12 +51,10 @@ def train(epoch):
         outputs = net(images)
         
         # Get kurtosis statistics for feature maps of conv2d layers
-        kurtosis_conv2d_fm, kurtosis_conv2d_metrics = {}, {}
-        if args.kurtosis_loss:
-          kurtosis_conv2d_fm, kurtosis_conv2d_metrics = get_statistics_from_layer_cache(
-            conv2d_feature_map_cache, 
-            statistics_func=compute_feature_map_kurtosis, 
-            metrics_name_template="train/kurtosis_conv2d_fm/kurtosis_{}")
+        kurtosis_conv2d_fm, kurtosis_conv2d_metrics = get_statistics_from_layer_cache(
+          conv2d_feature_map_cache, 
+          statistics_func=compute_feature_map_kurtosis, 
+          metrics_name_template="train/kurtosis_conv2d_fm/kurtosis_{}")
 
         # Get covariance statistics for conv1x1 layers feature map 
         covariance_distance_identity_whitening_feature_map, covariance_distance_identity_whitening_feature_map_metrics = {}, {}
@@ -72,11 +70,11 @@ def train(epoch):
       
         cross_entropy_loss = loss_function(outputs, labels)
         pbar_descrip = f"CE Loss: {cross_entropy_loss.item()}"
-        if args.kurtosis_loss:
-            #kurtosis + cross entropy global loss
-            kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_fm, args)
-            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_fm, cross_entropy_loss, args)
+        #kurtosis and cross entropy global loss
+        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_fm, args)
+        kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_fm, cross_entropy_loss, args)
 
+        if args.kurtosis_loss and epoch < args.kurtosis_warmup:   
             loss = cross_entropy_loss + kurtosis_term 
             pbar_descrip += f"\tKurtosis Loss: {kurtosis_term.item()}"
             pbar_descrip += f"\tKurtosis Sum: {kurtosis_sum.item()}"
@@ -112,13 +110,15 @@ def train(epoch):
               "train/learning_rate": optimizer.param_groups[0]['lr'],
               "train/global_loss": loss.item()
             }
+            
+            # Include kurtosis metrics
+            metrics.update({**kurtosis_conv2d_metrics, 
+                    **covariance_distance_identity_whitening_feature_map_metrics,
+                    **{'train/kurtosis_sum': kurtosis_sum.item() if args.kurtosis_loss else None,
+                      'train/kurtosis_loss_term': kurtosis_term.item() if args.kurtosis_loss else None} 
+            })
 
-            wandb.log({**kurtosis_conv2d_metrics, 
-                      # **covariance_distance_identity_feature_map_metrics,
-                      **covariance_distance_identity_whitening_feature_map_metrics,
-                      **metrics,
-                      **{'train/kurtosis_sum': kurtosis_sum.item() if args.kurtosis_loss else None,
-                        'train/kurtosis_loss_term': kurtosis_term.item() if args.kurtosis_loss else None} }) 
+            wandb.log(metrics) 
 
         n_iter = (epoch - 1) * len(cifar100_training_loader) + batch_index + 1
 
@@ -126,7 +126,7 @@ def train(epoch):
           print('Training Epoch: {epoch} [{trained_samples}/{total_samples}]\tGlobal Loss: {:0.4f}\tCE_loss: {:0.4f}\tKurtosis_loss: {:0.4f}\tLR: {:0.6f}'.format(
               loss.item(),
               cross_entropy_loss.item(),
-              kurtosis_term.item() if args.kurtosis_loss else -1,
+              kurtosis_term.item() if args.kurtosis_loss and epoch < args.kurtosis_warmup else -1,
               optimizer.param_groups[0]['lr'],
               epoch=epoch,
               trained_samples=batch_index * args.b + len(images),
@@ -168,12 +168,6 @@ def eval_training(epoch=0, tb=True):
           statistics_func=compute_feature_map_kurtosis, 
           metrics_name_template="test/kurtosis_conv2d_fm/kurtosis_{}")
 
-        # # Calculate conv2d kernel kurtoses
-        # kurtosis_kernel = compute_all_conv2d_kernel_kurtoses(net)
-        # # Get .items() for wandb metrics emitting
-        # kurtosis_kernel_metrics = { "test/kurtosis_conv2d_kernels/kurtosis_{}".format(k):v \
-        #                       for (k,v) in kurtosis_kernel.items()}
-
         covariance_distance_identity_whitening_feature_map, covariance_distance_identity_whitening_feature_map_metrics = {}, {}
         if args.whitening_strength != None:
           covariance_distance_identity_whitening_feature_map, covariance_distance_identity_whitening_feature_map_metrics = get_statistics_from_layer_cache(
@@ -185,19 +179,18 @@ def eval_training(epoch=0, tb=True):
               for (k,v) in batch_norm_feature_map_cache.items():
                   assert feature_map_has_0_mean_1_var(v)
             
-        if args.wandb:
+        if args.wandb and args.kurtosis_loss and epoch < args.kurtosis_warmup:
             wandb.log({**kurtosis_conv2d_metrics, 
                       # **covariance_distance_identity_feature_map_metrics
                       **covariance_distance_identity_whitening_feature_map_metrics
                       })
 
         cross_entropy_loss = loss_function(outputs, labels)
-   
-        if args.kurtosis_loss:
-            #kurtosis + cross entropy global loss
-            kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_fm, args)
-            kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_fm, cross_entropy_loss, args)
-                        
+        #kurtosis and cross entropy global loss
+        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_fm, args)
+        kurtosis_term = compute_kurtosis_term(kurtosis_conv2d_fm, cross_entropy_loss, args)
+
+        if args.kurtosis_loss and epoch < args.kurtosis_warmup:                        
             loss = cross_entropy_loss + kurtosis_term
         else:
             #cross entropy global loss
@@ -243,12 +236,18 @@ def eval_training(epoch=0, tb=True):
 
     
     if args.wandb:
+        kurtosis_metrics = {}
+        if args.kurtosis_loss:
+          kurtosis_metrics = {
+            'test/average_kurtosis_sum': test_average_kurtosis_sum,
+            'test/average_kurtosis_loss_term': test_average_kurtosis_term
+          }
+
         wandb.log({"test/average_cross_entropy_loss": test_average_cross_entropy_term,
                   "test/average_global_loss": test_loss,
                   "test/test_accuracy": test_correct.float() / len(cifar100_test_loader.dataset),
                   "train/train_accuracy": train_correct.float() / len(cifar100_training_loader.dataset),
-                  'test/average_kurtosis_sum': test_average_kurtosis_sum if args.kurtosis_loss else None,
-                  'test/average_kurtosis_loss_term': test_average_kurtosis_term if args.kurtosis_loss else None})
+                  **kurtosis_metrics})
 
     return test_correct.float() / len(cifar100_test_loader.dataset)
 
@@ -271,7 +270,8 @@ if __name__ == '__main__':
     parser.add_argument('-remove_first_conv2d_for_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-subtract_log_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-add_inverse_kurtosis_loss', action='store_true', default=False, help='')
-    parser.add_argument('-add_mse_kurtosis_loss', type=float, default=None, help='')    
+    parser.add_argument('-add_mse_kurtosis_loss', type=float, default=None, help='')   
+    parser.add_argument('-kurtosis_warmup', type=float, default=float('inf'), help='')   
     
     #Whitening Args
     parser.add_argument('-post_whitening', action='store_true', default=False, help='')

@@ -15,11 +15,11 @@ def compute_kurtosis_sum(kurtosis_conv2d_feature_map, args):
 def compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss, args):
     # Select log kurtosis penalty
     if args.subtract_log_kurtosis_loss:
-        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
+        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map, args)
         kurtosis_term = -1 * torch.log(kurtosis_sum)
     # Select inverse kurtosis penalty
     elif args.add_inverse_kurtosis_loss:
-        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map)
+        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map, args)
         kurtosis_term = 1/kurtosis_sum
     elif args.add_mse_kurtosis_loss != None:
         loss = nn.MSELoss()
@@ -100,6 +100,54 @@ def feature_map_has_0_mean_1_var(feature_map, atol=1e-1):
     return return_check
 
 
+def compute_global_kurtosis(feature_map, enable_safety_checks=True):
+  """
+    feature_map: (b x c x h x w)
+  """
+  assert len(feature_map.shape) == 4
+
+  normalized_feature_map = make_feature_map_0_mean_1_var(feature_map)
+  # assert feature_map_has_0_mean_1_var(normalized_feature_map)
+
+  # flatten into one dimension
+  (b, c, h, w) = normalized_feature_map.shape
+  normalized_feature_map_collapsed = torch.flatten(normalized_feature_map)
+  if enable_safety_checks:
+    assert len(normalized_feature_map_collapsed.shape) == 1
+    assert normalized_feature_map_collapsed.shape[0] == b * c * h * w
+
+  # get deviation
+  mean = torch.mean(normalized_feature_map_collapsed) # 1
+  diffs = normalized_feature_map_collapsed - mean # 1
+  if enable_safety_checks:
+    assert len(diffs.shape) == 1
+    assert diffs.shape[0] == b * c * h * w
+
+  # get second moment
+  second_moment = torch.mean(torch.pow(diffs, 2)) # 1
+  if enable_safety_checks:
+    assert len(second_moment.shape) == 0
+
+  # get fourth moment
+  fourth_moment = torch.mean(torch.pow(diffs, 4)) # 1
+  if enable_safety_checks:
+    assert len(fourth_moment.shape) == 0
+
+  # get kurtosis
+  kurtosis_val = fourth_moment / (second_moment * second_moment)
+  if enable_safety_checks:
+    assert len(kurtosis_val.shape) == 0
+    from scipy.stats import kurtosis
+    scipy_kurtosis = kurtosis(normalized_feature_map_collapsed, fisher=False)
+    
+    import math
+    assert math.isclose(scipy_kurtosis, kurtosis_val, rel_tol=1e-4)
+
+  return kurtosis_val
+
+
+
+
 def compute_feature_map_kurtosis(feature_map):
   """
     feature_map: (b x c x h x w)
@@ -117,7 +165,6 @@ def compute_feature_map_kurtosis(feature_map):
   zscores = (diffs / torch.pow(var, 0.5)).squeeze() # b x c
   channel_kurt = torch.mean(torch.pow(zscores, 4.0), dim=1) # b
   
-
 
   # print(zscores.shape, channel_kurt.shape, var.shape, diffs.shape, mean.shape)
 

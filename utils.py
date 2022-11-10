@@ -335,6 +335,7 @@ def initialize_wandb(wandb_obj, settings, args):
             "batch_size": args.b,
             "lr": args.lr,
             "warm": args.warm,
+            "kurtosis_warmup": args.kurtosis_warmup,
             "bn_learnable_affine_params": not args.no_learnable_params_bn,
             "bn_track_running_stats": not args.no_track_running_stats_bn,
             "net": args.net,
