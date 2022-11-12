@@ -326,7 +326,7 @@ def cache_intermediate_output(name, cache):
       cache[name] = output.clone() 
   return hook
 
-def initialize_wandb(wandb_obj, settings, args):
+def initialize_wandb(wandb_obj, settings, args, kurtosis_loss_enabled=False):
     wandb_obj.init(
           project="Mehdi", 
           entity="tejm",
@@ -339,13 +339,15 @@ def initialize_wandb(wandb_obj, settings, args):
             "bn_learnable_affine_params": not args.no_learnable_params_bn,
             "bn_track_running_stats": not args.no_track_running_stats_bn,
             "net": args.net,
-            "kurtosis_loss": args.kurtosis_loss,
+            "global_kurtosis_loss": args.global_kurtosis_loss,
+            "fm_kurtosis_loss": args.fm_kurtosis_loss,
+            "kernel_kurtosis_loss": args.kernel_kurtosis_loss,
             "kurtosis_global_loss_multiplier": args.kurtosis_global_loss_multiplier,
-            'remove_first_conv2d_for_kurtosis_loss': None if not args.kurtosis_loss \
+            'remove_first_conv2d_for_kurtosis_loss': None if not kurtosis_loss_enabled \
                            else args.remove_first_conv2d_for_kurtosis_loss,
-            'add_inverse_kurtosis_loss': None if not args.kurtosis_loss \
+            'add_inverse_kurtosis_loss': None if not kurtosis_loss_enabled \
                            else args.add_inverse_kurtosis_loss,
-            'subtract_log_kurtosis_loss': None if not args.kurtosis_loss \
+            'subtract_log_kurtosis_loss': None if not kurtosis_loss_enabled \
                            else args.subtract_log_kurtosis_loss,
             'add_mse_kurtosis_loss': args.add_mse_kurtosis_loss,
             'post_whitening': args.post_whitening,
