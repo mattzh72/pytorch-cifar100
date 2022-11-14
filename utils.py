@@ -350,6 +350,7 @@ def initialize_wandb(wandb_obj, settings, args, kurtosis_loss_enabled=False):
             'subtract_log_kurtosis_loss': None if not kurtosis_loss_enabled \
                            else args.subtract_log_kurtosis_loss,
             'add_mse_kurtosis_loss': args.add_mse_kurtosis_loss,
+            'add_smoothl1_kurtosis_loss': args.add_smoothl1_kurtosis_loss,
             'post_whitening': args.post_whitening,
             'pre_whitening': args.pre_whitening,
             'switch_3x3conv2d_and_bn': args.switch_3x3conv2d_and_bn,

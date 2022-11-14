@@ -30,7 +30,7 @@ def compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss, args)
           loss = nn.MSELoss()
           target = args.add_mse_kurtosis_loss
         elif args.add_smoothl1_kurtosis_loss != None:
-          loss = nn.SmoothL1Loss(beta=1.0)
+          loss = nn.SmoothL1Loss(beta=1e-3)
           target = args.add_smoothl1_kurtosis_loss
 
         # If flag is set, discard first conv2d outputs
