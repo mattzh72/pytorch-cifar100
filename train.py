@@ -26,7 +26,7 @@ from conf import settings
 from utils import get_network, get_training_dataloader, get_test_dataloader, WarmUpLR, \
     most_recent_folder, most_recent_weights, last_epoch, best_acc_weights, cache_intermediate_output, \
     initialize_wandb, get_batch_norm_feature_map_cache, get_conv2d_feature_map_cache_and_name_of_first_conv, \
-    toggle_grad_module, toggle_grad_params, get_statistics_from_layer_cache
+    toggle_grad_module, toggle_grad_params, get_statistics_from_layer_cache, get_fc_feature_map_cache
     
 from kurtosis_loss_utils import compute_kurtosis_sum, compute_kurtosis_term, \
     compute_feature_map_kurtosis, compute_all_conv2d_kernel_kurtoses, \
@@ -61,16 +61,26 @@ def train(epoch, kurtosis_loss_enabled=False):
           kurtosis_metrics = { "train/kurtosis_conv2d_kernels/kurtosis_{}".format(k):v \
                                 for (k,v) in layer_kurtosis_map.items()}
         else:
+          # This is horrible, need to rework this logic
           if kurtosis_loss_enabled:
             if args.global_kurtosis_loss:
               statistics_func = compute_global_kurtosis
             elif args.fm_kurtosis_loss:
               statistics_func = compute_feature_map_kurtosis
 
+          if args.fc_layer_kurtosis_only:
+            cache = fc_feature_map_cache
+            metrics_name_template = "train/kurtosis_fc_fm/kurtosis_{}"
+          # default to conv2d featuremap
+          else:
+            cache = conv2d_feature_map_cache
+            metrics_name_template = "train/kurtosis_conv2d_fm/kurtosis_{}"
+
+          # Get kurtosis statistics for feature maps of conv2d layers
           layer_kurtosis_map, kurtosis_metrics = get_statistics_from_layer_cache(
-            conv2d_feature_map_cache, 
+            cache, 
             statistics_func=statistics_func, 
-            metrics_name_template="train/kurtosis_conv2d_fm/kurtosis_{}")
+            metrics_name_template=metrics_name_template)
 
         # Get covariance statistics for conv1x1 layers feature map 
         covariance_distance_identity_whitening_feature_map, covariance_distance_identity_whitening_feature_map_metrics = {}, {}
@@ -92,8 +102,9 @@ def train(epoch, kurtosis_loss_enabled=False):
 
         if kurtosis_loss_enabled and epoch < args.kurtosis_warmup:   
             loss = cross_entropy_loss + kurtosis_term 
+            total_num_layers = len(list(layer_kurtosis_map.keys()))
             pbar_descrip += f"\tKurtosis Loss: {kurtosis_term.item()}"
-            pbar_descrip += f"\tKurtosis Sum: {kurtosis_sum.item()}"
+            pbar_descrip += f"\tAvg Kurtosis Per Layer: {kurtosis_sum.item()/total_num_layers}"
         else:
             #cross entropy global loss
             loss = cross_entropy_loss
@@ -187,17 +198,26 @@ def eval_training(epoch=0, tb=True, kurtosis_loss_enabled=False):
           kurtosis_metrics = { "train/kurtosis_conv2d_kernels/kurtosis_{}".format(k):v \
                                 for (k,v) in layer_kurtosis_map.items()}
         else:
+          # This is horrible, need to get rid of this logic
           if kurtosis_loss_enabled:
             if args.global_kurtosis_loss:
               statistics_func = compute_global_kurtosis
             elif args.fm_kurtosis_loss:
               statistics_func = compute_feature_map_kurtosis
 
+          if args.fc_layer_kurtosis_only:
+            cache = fc_feature_map_cache
+            metrics_name_template = "test/kurtosis_fc_fm/kurtosis_{}"
+          # default to conv2d featuremap
+          else:
+            cache = conv2d_feature_map_cache
+            metrics_name_template = "test/kurtosis_conv2d_fm/kurtosis_{}"
+
           # Get kurtosis statistics for feature maps of conv2d layers
           layer_kurtosis_map, kurtosis_metrics = get_statistics_from_layer_cache(
-            conv2d_feature_map_cache, 
+            cache, 
             statistics_func=statistics_func, 
-            metrics_name_template="test/kurtosis_conv2d_fm/kurtosis_{}")
+            metrics_name_template=metrics_name_template)
 
         covariance_distance_identity_whitening_feature_map, covariance_distance_identity_whitening_feature_map_metrics = {}, {}
         if args.whitening_strength != None:
@@ -305,9 +325,10 @@ if __name__ == '__main__':
     parser.add_argument('-subtract_log_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-add_log_kurtosis_loss', action='store_true', default=False, help='this will minimize kurtosis')
     parser.add_argument('-add_inverse_kurtosis_loss', action='store_true', default=False, help='')
+    parser.add_argument('-fc_layer_kurtosis_only', action='store_true', default=False, help='only apply kurtosis loss to last layer')
     parser.add_argument('-add_mse_kurtosis_loss', type=float, default=None, help='')   
     parser.add_argument('-add_smoothl1_kurtosis_loss', type=float, default=None, help='')   
-    parser.add_argument('-kurtosis_warmup', type=float, default=float('inf'), help='')   
+    parser.add_argument('-kurtosis_warmup', type=float, default=float('inf'), help='')
     
     #Whitening Args
     parser.add_argument('-post_whitening', action='store_true', default=False, help='')
@@ -321,6 +342,7 @@ if __name__ == '__main__':
     ###############
     # SAFETY CHECKS
     ###############
+    kurtosis_loss_enabled = False
     if args.fm_kurtosis_loss or args.global_kurtosis_loss or args.kernel_kurtosis_loss:
       kurtosis_loss_enabled = True
 
@@ -337,7 +359,7 @@ if __name__ == '__main__':
     else:
       assert sum(kurtosis_flags) == 0
 
-    assert bool(kurtosis_loss_enabled) == bool(args.kurtosis_global_loss_multiplier)    
+    # assert bool(kurtosis_loss_enabled) == bool(args.kurtosis_global_loss_multiplier)    
     ##################
     # END SAFETY CHECKS
     ###################
@@ -356,6 +378,7 @@ if __name__ == '__main__':
 
     #set up intermediate layer feature map caching
     batch_norm_feature_map_cache = get_batch_norm_feature_map_cache(net)
+    fc_feature_map_cache = get_fc_feature_map_cache(net)
     
     #data preprocessing:
     cifar100_training_loader = get_training_dataloader(

@@ -354,7 +354,8 @@ def initialize_wandb(wandb_obj, settings, args, kurtosis_loss_enabled=False):
             'post_whitening': args.post_whitening,
             'pre_whitening': args.pre_whitening,
             'switch_3x3conv2d_and_bn': args.switch_3x3conv2d_and_bn,
-            'whitening_strength': args.whitening_strength
+            'whitening_strength': args.whitening_strength,
+            'fc_layer_kurtosis_only': args.fc_layer_kurtosis_only,
           }
         )
     wandb_obj.run.summary["best_accuracy"] = 0
@@ -379,6 +380,16 @@ def get_conv2d_feature_map_cache_and_name_of_first_conv(net):
                 if name_of_first_conv is None:
                     name_of_first_conv = name
     return conv2d_feature_map_cache, name_of_first_conv
+
+
+def get_fc_feature_map_cache(net):
+    """ 
+      Get the feature map cache for input of the fully connected layer
+    """
+    cache = {}
+    fc_name, fc_layer = list(net.named_modules())[-2]
+    fc_layer.register_forward_hook(cache_intermediate_output(fc_name, cache))
+    return cache
 
 
 def toggle_grad_module(module, gradStatus):

@@ -2,28 +2,28 @@ import torch
 import torch.nn as nn
 from google.protobuf.descriptor import Error
 
-def compute_kurtosis_sum(kurtosis_conv2d_feature_map, args):
+def compute_kurtosis_sum(kurtosis_cache, args):
     kurtosis_sum = 0
             
-    for name,val in kurtosis_conv2d_feature_map.items():
+    for name, kurtosis in kurtosis_cache.items():
         if name == args.name_of_first_conv and args.remove_first_conv2d_for_kurtosis_loss:
             pass
         else:
-            kurtosis_sum = kurtosis_sum + val
+            kurtosis_sum = kurtosis_sum + kurtosis
     return kurtosis_sum
 
-def compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss, args):
+def compute_kurtosis_term(kurtosis_cache, cross_entropy_loss, args):
     # Select subtract log kurtosis 
     if args.subtract_log_kurtosis_loss:
-        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map, args)
+        kurtosis_sum = compute_kurtosis_sum(kurtosis_cache, args)
         kurtosis_term = -1 * torch.log(kurtosis_sum)
     # Select add log kurtosis ()
     elif args.add_log_kurtosis_loss:
-        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map, args)
+        kurtosis_sum = compute_kurtosis_sum(kurtosis_cache, args)
         kurtosis_term = torch.log(kurtosis_sum)
     # Select inverse kurtosis penalty
     elif args.add_inverse_kurtosis_loss:
-        kurtosis_sum = compute_kurtosis_sum(kurtosis_conv2d_feature_map, args)
+        kurtosis_sum = compute_kurtosis_sum(kurtosis_cache, args)
         kurtosis_term = 1/kurtosis_sum
     else:
         if args.add_mse_kurtosis_loss != None:
@@ -35,9 +35,9 @@ def compute_kurtosis_term(kurtosis_conv2d_feature_map, cross_entropy_loss, args)
 
         # If flag is set, discard first conv2d outputs
         if args.remove_first_conv2d_for_kurtosis_loss:
-          kurtoses = [v for (k,v) in kurtosis_conv2d_feature_map.items() if k != args.name_of_first_conv]
+          kurtoses = [v for (k,v) in kurtosis_cache.items() if k != args.name_of_first_conv]
         else:
-          kurtoses = list(kurtosis_conv2d_feature_map.values())
+          kurtoses = list(kurtosis_cache.values())
         kurtoses = torch.stack(kurtoses)
         kurtosis_term = loss(kurtoses, torch.ones(kurtoses.shape[0]).cuda() * target)
 
@@ -113,7 +113,8 @@ def compute_global_kurtosis(feature_map, normalize_first=True, enable_safety_che
   """
     feature_map: (b x c x h x w)
   """
-  assert len(feature_map.shape) == 4
+  if enable_safety_checks:
+    assert len(feature_map.shape) == 4
 
   (b, c, h, w) = feature_map.shape
   # flatten into one dimension
