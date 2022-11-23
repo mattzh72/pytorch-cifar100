@@ -342,7 +342,7 @@ def initialize_wandb(wandb_obj, settings, args, kurtosis_loss_enabled=False):
             "global_kurtosis_loss": args.global_kurtosis_loss,
             "fm_kurtosis_loss": args.fm_kurtosis_loss,
             "kernel_kurtosis_loss": args.kernel_kurtosis_loss,
-            "kurtosis_global_loss_multiplier": args.kurtosis_global_loss_multiplier,
+            "kurtosis_loss_multiplier": args.kurtosis_loss_multiplier,
             'remove_first_conv2d_for_kurtosis_loss': None if not kurtosis_loss_enabled \
                            else args.remove_first_conv2d_for_kurtosis_loss,
             'add_inverse_kurtosis_loss': None if not kurtosis_loss_enabled \
@@ -356,6 +356,11 @@ def initialize_wandb(wandb_obj, settings, args, kurtosis_loss_enabled=False):
             'switch_3x3conv2d_and_bn': args.switch_3x3conv2d_and_bn,
             'whitening_strength': args.whitening_strength,
             'fc_layer_kurtosis_only': args.fc_layer_kurtosis_only,
+            'skewness_loss_multiplier': args.skewness_loss_multiplier, 
+            'add_mse_skewness_loss': args.add_mse_skewness_loss, 
+            'remove_first_conv2d_for_skewness_loss': args.remove_first_conv2d_for_skewness_loss,
+            'adaptive_multiplier_ce_thresh': args.adaptive_multiplier_ce_thresh,
+            'adaptive_multiplier_patience': args.adaptive_multiplier_patience,
           }
         )
     wandb_obj.run.summary["best_accuracy"] = 0
@@ -369,6 +374,7 @@ def get_batch_norm_feature_map_cache(net):
     return batch_norm_feature_map_cache
 
 
+# NEED TO REWRITE THIS TO JUST FILTER OUT FIRST CONV
 def get_conv2d_feature_map_cache_and_name_of_first_conv(net):
     conv2d_feature_map_cache = {}
     name_of_first_conv = None

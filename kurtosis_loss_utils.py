@@ -12,7 +12,7 @@ def compute_kurtosis_sum(kurtosis_cache, args):
             kurtosis_sum = kurtosis_sum + kurtosis
     return kurtosis_sum
 
-def compute_kurtosis_term(kurtosis_cache, cross_entropy_loss, args):
+def compute_kurtosis_term(kurtosis_cache, args):
     # Select subtract log kurtosis 
     if args.subtract_log_kurtosis_loss:
         kurtosis_sum = compute_kurtosis_sum(kurtosis_cache, args)
@@ -41,7 +41,7 @@ def compute_kurtosis_term(kurtosis_cache, cross_entropy_loss, args):
         kurtoses = torch.stack(kurtoses)
         kurtosis_term = loss(kurtoses, torch.ones(kurtoses.shape[0]).cuda() * target)
 
-    return kurtosis_term * args.kurtosis_global_loss_multiplier
+    return kurtosis_term * args.kurtosis_loss_multiplier
 
 
 def compute_all_conv2d_kernel_kurtoses(net):
@@ -109,7 +109,7 @@ def feature_map_has_0_mean_1_var(feature_map, atol=1e-1):
     return return_check
 
 
-def compute_global_kurtosis(feature_map, normalize_first=True, enable_safety_checks=False):
+def compute_global_kurtosis(feature_map, normalize_first=False, enable_safety_checks=False):
   """
     feature_map: (b x c x h x w)
   """

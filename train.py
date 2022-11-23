@@ -35,6 +35,8 @@ from kurtosis_loss_utils import compute_kurtosis_sum, compute_kurtosis_term, \
 from whitening_loss_utils import compute_feature_map_covariance_distance_from_identity, \
       feature_map_has_0_mean_1_var, get_whitening_conv1x1_feature_map_cache, get_whitening_conv1x1s
 
+from skewness_loss_utils import compute_skewness_term, compute_global_skewness, compute_channel_skewness
+
 
 def train(epoch, kurtosis_loss_enabled=False):
     start = time.time()
@@ -49,11 +51,11 @@ def train(epoch, kurtosis_loss_enabled=False):
         optimizer.zero_grad()
         
         outputs = net(images)
-        
         # Get kurtosis statistics for feature maps of conv2d layers
         # TODO: If kurtosis loss is disabled, this will break - we expect to always be collecting 
         # kurtosis statistics and emitting to wandb
         # If kurtosis_loss is not enabled, then we will not have a statistics_func and this will break kurtosis_conv2d_fm below
+        kurtosis_metrics = {}
         if args.kernel_kurtosis_loss: 
           # Calculate conv2d kernel kurtoses
           layer_kurtosis_map = compute_all_conv2d_kernel_kurtoses(net)
@@ -68,19 +70,19 @@ def train(epoch, kurtosis_loss_enabled=False):
             elif args.fm_kurtosis_loss:
               statistics_func = compute_feature_map_kurtosis
 
-          if args.fc_layer_kurtosis_only:
-            cache = fc_feature_map_cache
-            metrics_name_template = "train/kurtosis_fc_fm/kurtosis_{}"
-          # default to conv2d featuremap
-          else:
-            cache = conv2d_feature_map_cache
-            metrics_name_template = "train/kurtosis_conv2d_fm/kurtosis_{}"
+            if args.fc_layer_kurtosis_only:
+              cache = fc_feature_map_cache
+              metrics_name_template = "train/kurtosis_fc_fm/kurtosis_{}"
+            # default to conv2d featuremap
+            else:
+              cache = conv2d_feature_map_cache
+              metrics_name_template = "train/kurtosis_conv2d_fm/kurtosis_{}"
 
-          # Get kurtosis statistics for feature maps of conv2d layers
-          layer_kurtosis_map, kurtosis_metrics = get_statistics_from_layer_cache(
-            cache, 
-            statistics_func=statistics_func, 
-            metrics_name_template=metrics_name_template)
+            # Get kurtosis statistics for feature maps of conv2d layers
+            layer_kurtosis_map, kurtosis_metrics = get_statistics_from_layer_cache(
+              cache, 
+              statistics_func=statistics_func, 
+              metrics_name_template=metrics_name_template)
 
         # Get covariance statistics for conv1x1 layers feature map 
         covariance_distance_identity_whitening_feature_map, covariance_distance_identity_whitening_feature_map_metrics = {}, {}
@@ -96,18 +98,31 @@ def train(epoch, kurtosis_loss_enabled=False):
       
         cross_entropy_loss = loss_function(outputs, labels)
         pbar_descrip = f"CE Loss: {cross_entropy_loss.item()}"
-        #kurtosis and cross entropy global loss
-        kurtosis_sum = compute_kurtosis_sum(layer_kurtosis_map, args)
-        kurtosis_term = compute_kurtosis_term(layer_kurtosis_map, cross_entropy_loss, args)
 
-        if kurtosis_loss_enabled and epoch < args.kurtosis_warmup:   
-            loss = cross_entropy_loss + kurtosis_term 
+        loss = cross_entropy_loss
+        if kurtosis_loss_enabled and epoch < args.kurtosis_warmup:  
+            #kurtosis and cross entropy global loss
+            kurtosis_sum = compute_kurtosis_sum(layer_kurtosis_map, args)
+            kurtosis_term = compute_kurtosis_term(layer_kurtosis_map, args) 
+            loss += kurtosis_term 
             total_num_layers = len(list(layer_kurtosis_map.keys()))
             pbar_descrip += f"\tKurtosis Loss: {kurtosis_term.item()}"
             pbar_descrip += f"\tAvg Kurtosis Per Layer: {kurtosis_sum.item()/total_num_layers}"
-        else:
-            #cross entropy global loss
-            loss = cross_entropy_loss
+
+        skewness_metrics = {}
+        if args.skewness_loss_enabled:
+            # Get skewness statistics 
+            layer_skewness_map, skewness_metrics = get_statistics_from_layer_cache(
+                conv2d_feature_map_cache, 
+                statistics_func=compute_global_skewness, 
+                metrics_name_template="train/skewness_conv2d_global/{}")    
+
+            skewness_term = compute_skewness_term(layer_skewness_map, cross_entropy_loss, args)            
+            skewness_metrics.update({'train/skewness_loss_term': skewness_term.item()})
+
+            loss += skewness_term
+            total_num_layers = len(list(layer_skewness_map.keys()))
+            pbar_descrip += f"\tSkewness Loss: {skewness_term.item()}"
 
         if args.whitening_strength != None:
           toggle_grad_module(net, False)
@@ -140,6 +155,7 @@ def train(epoch, kurtosis_loss_enabled=False):
             
             # Include kurtosis metrics
             metrics.update({**kurtosis_metrics, 
+                    **skewness_metrics,
                     **covariance_distance_identity_whitening_feature_map_metrics,
                     **{'train/kurtosis_sum': kurtosis_sum.item() if kurtosis_loss_enabled else None,
                       'train/kurtosis_loss_term': kurtosis_term.item() if kurtosis_loss_enabled else None} 
@@ -191,6 +207,7 @@ def eval_training(epoch=0, tb=True, kurtosis_loss_enabled=False):
         outputs = net(images)
 
         # TODO: Fix this, read above Todo in train()
+        kurtosis_metrics = {}
         if args.kernel_kurtosis_loss: 
           # Calculate conv2d kernel kurtoses
           layer_kurtosis_map = compute_all_conv2d_kernel_kurtoses(net)
@@ -205,19 +222,19 @@ def eval_training(epoch=0, tb=True, kurtosis_loss_enabled=False):
             elif args.fm_kurtosis_loss:
               statistics_func = compute_feature_map_kurtosis
 
-          if args.fc_layer_kurtosis_only:
-            cache = fc_feature_map_cache
-            metrics_name_template = "test/kurtosis_fc_fm/kurtosis_{}"
-          # default to conv2d featuremap
-          else:
-            cache = conv2d_feature_map_cache
-            metrics_name_template = "test/kurtosis_conv2d_fm/kurtosis_{}"
+            if args.fc_layer_kurtosis_only:
+              cache = fc_feature_map_cache
+              metrics_name_template = "test/kurtosis_fc_fm/kurtosis_{}"
+            # default to conv2d featuremap
+            else:
+              cache = conv2d_feature_map_cache
+              metrics_name_template = "test/kurtosis_conv2d_fm/kurtosis_{}"
 
-          # Get kurtosis statistics for feature maps of conv2d layers
-          layer_kurtosis_map, kurtosis_metrics = get_statistics_from_layer_cache(
-            cache, 
-            statistics_func=statistics_func, 
-            metrics_name_template=metrics_name_template)
+            # Get kurtosis statistics for feature maps of conv2d layers
+            layer_kurtosis_map, kurtosis_metrics = get_statistics_from_layer_cache(
+              cache, 
+              statistics_func=statistics_func, 
+              metrics_name_template=metrics_name_template)
 
         covariance_distance_identity_whitening_feature_map, covariance_distance_identity_whitening_feature_map_metrics = {}, {}
         if args.whitening_strength != None:
@@ -229,23 +246,25 @@ def eval_training(epoch=0, tb=True, kurtosis_loss_enabled=False):
         if args.norm_checks and args.no_learnable_params_bn and args.no_track_running_stats_bn:
               for (k,v) in batch_norm_feature_map_cache.items():
                   assert feature_map_has_0_mean_1_var(v)
-            
-        if args.wandb and kurtosis_loss_enabled and epoch < args.kurtosis_warmup:
-            wandb.log({**kurtosis_metrics, 
-                      # **covariance_distance_identity_feature_map_metrics
-                      **covariance_distance_identity_whitening_feature_map_metrics
-                      })
 
         cross_entropy_loss = loss_function(outputs, labels)
         #kurtosis and cross entropy global loss
-        kurtosis_sum = compute_kurtosis_sum(layer_kurtosis_map, args)
-        kurtosis_term = compute_kurtosis_term(layer_kurtosis_map, cross_entropy_loss, args)
 
-        if kurtosis_loss_enabled and epoch < args.kurtosis_warmup:                        
-            loss = cross_entropy_loss + kurtosis_term
-        else:
-            #cross entropy global loss
-            loss = cross_entropy_loss
+        loss = cross_entropy_loss
+        if kurtosis_loss_enabled and epoch < args.kurtosis_warmup:  
+            kurtosis_sum = compute_kurtosis_sum(layer_kurtosis_map, args)
+            kurtosis_term = compute_kurtosis_term(layer_kurtosis_map, args)                      
+            loss += kurtosis_term
+
+        # Get skewness statistics 
+        skewness_metrics = {}
+        if args.skewness_loss_enabled:
+            layer_skewness_map, skewness_metrics = get_statistics_from_layer_cache(
+              conv2d_feature_map_cache, 
+              statistics_func=compute_global_skewness, 
+              metrics_name_template="test/skewness_conv2d_global/{}")
+            skewness_term = compute_skewness_term(layer_skewness_map, cross_entropy_loss, args, eval_mode=True)
+            loss += skewness_term
 
         test_loss += loss.item() * len(images)/len(cifar100_test_loader.dataset)
         test_average_cross_entropy_term += cross_entropy_loss.item() * len(images)/len(cifar100_test_loader.dataset)
@@ -288,18 +307,24 @@ def eval_training(epoch=0, tb=True, kurtosis_loss_enabled=False):
       print()
     
     if args.wandb:
-        kurtosis_metrics = {}
         if kurtosis_loss_enabled:
-          kurtosis_metrics = {
+          kurtosis_metrics.update({
             'test/average_kurtosis_sum': test_average_kurtosis_sum,
             'test/average_kurtosis_loss_term': test_average_kurtosis_term
-          }
+          })
+
+        #       if args.wandb and kurtosis_loss_enabled and epoch < args.kurtosis_warmup:
+        # wandb.log({**kurtosis_metrics, 
+        #           # **covariance_distance_identity_feature_map_metrics
+        #           **covariance_distance_identity_whitening_feature_map_metrics
+        #           })
 
         wandb.log({"test/average_cross_entropy_loss": test_average_cross_entropy_term,
                   "test/average_global_loss": test_loss,
                   "test/test_accuracy": test_correct.float() / len(cifar100_test_loader.dataset),
                   "train/train_accuracy": train_correct.float() / len(cifar100_training_loader.dataset),
-                  **kurtosis_metrics})
+                  **kurtosis_metrics,
+                  **skewness_metrics})
 
     return test_correct.float() / len(cifar100_test_loader.dataset)
 
@@ -320,7 +345,7 @@ if __name__ == '__main__':
     parser.add_argument('-fm_kurtosis_loss', action='store_true', default=False, help='enable feature map kurtosis loss')
     parser.add_argument('-global_kurtosis_loss', action='store_true', default=False, help='enable global kurtosis loss')
     parser.add_argument('-kernel_kurtosis_loss', action='store_true', default=False, help='enable kernel kurtosis loss')
-    parser.add_argument('-kurtosis_global_loss_multiplier', type=float, default=None, help='hyperparameter multiplier for kurtosis loss term in global loss')
+    parser.add_argument('-kurtosis_loss_multiplier', type=float, default=None, help='hyperparameter multiplier for kurtosis loss term in global loss')
     parser.add_argument('-remove_first_conv2d_for_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-subtract_log_kurtosis_loss', action='store_true', default=False, help='')
     parser.add_argument('-add_log_kurtosis_loss', action='store_true', default=False, help='this will minimize kurtosis')
@@ -330,6 +355,15 @@ if __name__ == '__main__':
     parser.add_argument('-add_smoothl1_kurtosis_loss', type=float, default=None, help='')   
     parser.add_argument('-kurtosis_warmup', type=float, default=float('inf'), help='')
     
+    #Skewness args
+    parser.add_argument('-remove_first_conv2d_for_skewness_loss', action='store_true', default=False, help='')
+    parser.add_argument('-add_mse_skewness_loss', type=float, default=None, help='')   
+    parser.add_argument('-skewness_loss_multiplier', type=float, default=None, help='hyperparameter multiplier for skewness loss term')
+
+    #Multiplier
+    parser.add_argument('-adaptive_multiplier_ce_thresh', type=float, default=None, help='percentage threshold for statistical regularizer strength')
+    parser.add_argument('-adaptive_multiplier_patience', type=int, default=None, help='')
+
     #Whitening Args
     parser.add_argument('-post_whitening', action='store_true', default=False, help='')
     parser.add_argument('-pre_whitening', action='store_true', default=False, help='')
@@ -342,6 +376,10 @@ if __name__ == '__main__':
     ###############
     # SAFETY CHECKS
     ###############
+
+    # infer skewness loss enabled
+    args.skewness_loss_enabled = args.add_mse_skewness_loss is not None
+
     kurtosis_loss_enabled = False
     if args.fm_kurtosis_loss or args.global_kurtosis_loss or args.kernel_kurtosis_loss:
       kurtosis_loss_enabled = True
