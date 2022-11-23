@@ -413,7 +413,7 @@ def get_statistics_from_layer_cache(cache, statistics_func, metrics_name_templat
                           for (k,v) in cache.items()} 
     
     if metrics_name_template != None: 
-      metrics = {metrics_name_template.format(k):v.item() \
+      metrics = {metrics_name_template.format(k):v \
                           for (k,v) in statistics.items()}
 
       return statistics, metrics 

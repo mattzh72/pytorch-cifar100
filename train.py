@@ -112,9 +112,13 @@ def train(epoch, kurtosis_loss_enabled=False):
         skewness_metrics = {}
         if args.skewness_loss_enabled:
             # Get skewness statistics 
+            statistics_func=compute_global_skewness
+            if args.channel_skewness_loss:
+              statistics_func=compute_channel_skewness
+
             layer_skewness_map, skewness_metrics = get_statistics_from_layer_cache(
                 conv2d_feature_map_cache, 
-                statistics_func=compute_global_skewness, 
+                statistics_func=statistics_func, 
                 metrics_name_template="train/skewness_conv2d_global/{}")    
 
             skewness_term = compute_skewness_term(layer_skewness_map, cross_entropy_loss, args)            
@@ -259,9 +263,13 @@ def eval_training(epoch=0, tb=True, kurtosis_loss_enabled=False):
         # Get skewness statistics 
         skewness_metrics = {}
         if args.skewness_loss_enabled:
+            statistics_func=compute_global_skewness
+            if args.channel_skewness_loss:
+              statistics_func=compute_channel_skewness
+
             layer_skewness_map, skewness_metrics = get_statistics_from_layer_cache(
               conv2d_feature_map_cache, 
-              statistics_func=compute_global_skewness, 
+              statistics_func=statistics_func, 
               metrics_name_template="test/skewness_conv2d_global/{}")
             skewness_term = compute_skewness_term(layer_skewness_map, cross_entropy_loss, args, eval_mode=True)
             loss += skewness_term
@@ -356,6 +364,8 @@ if __name__ == '__main__':
     parser.add_argument('-kurtosis_warmup', type=float, default=float('inf'), help='')
     
     #Skewness args
+    parser.add_argument('-global_skewness_loss', action='store_true', default=False, help='')
+    parser.add_argument('-channel_skewness_loss', action='store_true', default=False, help='')
     parser.add_argument('-remove_first_conv2d_for_skewness_loss', action='store_true', default=False, help='')
     parser.add_argument('-add_mse_skewness_loss', type=float, default=None, help='')   
     parser.add_argument('-skewness_loss_multiplier', type=float, default=None, help='hyperparameter multiplier for skewness loss term')

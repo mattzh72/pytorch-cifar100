@@ -168,19 +168,16 @@ def compute_feature_map_kurtosis(feature_map):
   """
   assert len(feature_map.shape) == 4
 
-  normalized_feature_map = make_feature_map_0_mean_1_var(feature_map)
-  # assert feature_map_has_0_mean_1_var(normalized_feature_map)
+  (b, c, h, w) = feature_map.shape
+  feature_map_hw_collapsed = feature_map.reshape(b, c, h * w) # b x c x h * w
+  channel_means = torch.mean(feature_map_hw_collapsed, dim=(0, 2)).unsqueeze(0).unsqueeze(2) # 1 x c x 1
+  diffs = feature_map_hw_collapsed - channel_means # b x c x h * w
 
-  (b, c, h, w) = normalized_feature_map.shape
-  normalized_feature_map_hw_collapsed = normalized_feature_map.reshape(b, c, h * w)
-  mean = torch.mean(normalized_feature_map_hw_collapsed, dim=1).unsqueeze(dim=1) # b x 1 x h*w
-  diffs = torch.linalg.norm(normalized_feature_map_hw_collapsed - mean, dim=-1) # b x c
-  var = torch.mean(torch.pow(diffs, 2.0), dim=1).unsqueeze(dim=1) # b x 1
-  zscores = (diffs / torch.pow(var, 0.5)).squeeze() # b x c
-  channel_kurt = torch.mean(torch.pow(zscores, 4.0), dim=1) # b
-  
+  # get second, fourth moment
+  second_moment = torch.mean(torch.pow(diffs, 2), dim=(0, 2)) # c
+  fourth_moment = torch.mean(torch.pow(diffs, 4), dim=(0, 2)) # c
 
-  # print(zscores.shape, channel_kurt.shape, var.shape, diffs.shape, mean.shape)
+  # get population kurtosis per channel
+  return torch.div(fourth_moment, torch.pow(second_moment, 2))
 
-  return torch.mean(channel_kurt) 
 
